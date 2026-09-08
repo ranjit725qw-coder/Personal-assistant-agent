@@ -63,7 +63,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.jarves.mh"
+        applicationId = "com.ranjit.personalassistant"
         minSdk = 28
         // The direct APK retains the proven target-28 PRoot execution path. The
         // Play build targets current Android while its runtime path is validated.
