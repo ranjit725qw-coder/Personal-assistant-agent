@@ -3305,6 +3305,13 @@ private fun ChatTab(
                             },
                         )
 
+                        VoiceInputButton(
+                            enabled = !isRunning,
+                            onResult = { spoken ->
+                                prompt = if (prompt.isBlank()) spoken else prompt.trimEnd() + " " + spoken
+                            },
+                        )
+
                         Spacer(Modifier.width(4.dp))
 
                         if (isRunning) {
@@ -3713,6 +3720,10 @@ private fun MessageBubble(message: ChatMessage, onRunInTerminal: (String) -> Uni
                         }
                     }
                 }
+                if (!message.fromUser && message.text.isNotBlank()) {
+                    SpeakButton(textToSpeak = message.text)
+                }
+
                 Spacer(Modifier.height(4.dp))
             }
         }
@@ -4118,6 +4129,13 @@ private fun BrandMark(modifier: Modifier = Modifier, compact: Boolean = false) {
     ) {
         Icon(
             imageVector = Icons.Default.Terminal,
+            contentDescription = "Mobile Harness",
+            modifier = Modifier.size(iconSize),
+            tint = primary,
+        )
+    }
+}
+ult.Terminal,
             contentDescription = "Mobile Harness",
             modifier = Modifier.size(iconSize),
             tint = primary,
