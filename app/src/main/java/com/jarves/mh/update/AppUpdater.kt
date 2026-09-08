@@ -9,16 +9,6 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
-import org.json.JSONObject
-
-data class AppUpdateInfo(
-    val versionCode: Long,
-    val versionName: String,
-    val apkUrl: String,
-    val sha256: String,
-    val sizeBytes: Long,
-    val notes: String,
-)
 
 class AppUpdater(
     private val context: Context,
@@ -33,31 +23,18 @@ class AppUpdater(
 ) {
     fun check(): AppUpdateInfo? {
         val manifestUrl = manifestUrlOverride.ifBlank { BuildConfig.APP_UPDATE_MANIFEST_URL }
-        if (!manifestUrl.startsWith("https://")) return null
+        check(manifestUrl.startsWith("https://")) { "Update manifest URL must use HTTPS" }
         val connection = URL(manifestUrl).openConnection() as HttpURLConnection
         return try {
             connection.connectTimeout = 8_000
             connection.readTimeout = 10_000
             connection.instanceFollowRedirects = true
             connection.setRequestProperty("Accept", "application/json")
-            val code = connection.responseCode
-            if (code !in 200..299) return null
-            val body = connection.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(body)
-            val versionCode = root.optLong("versionCode")
-            if (versionCode <= BuildConfig.VERSION_CODE) return null
-            val artifact = root.optJSONObject("artifacts")?.optJSONObject(BuildConfig.APP_VARIANT)
-                ?: root.optJSONObject(BuildConfig.APP_VARIANT)
-                ?: root
-            val url = artifact.optString("url").ifBlank { artifact.optString("apkUrl") }
-            if (!url.startsWith("https://")) return null
-            AppUpdateInfo(
-                versionCode = versionCode,
-                versionName = root.optString("versionName", versionCode.toString()),
-                apkUrl = url,
-                sha256 = artifact.optString("sha256").lowercase(),
-                sizeBytes = artifact.optLong("sizeBytes", -1L),
-                notes = root.optString("notes"),
+            UpdateManifestParser.parseResponse(
+                code = connection.responseCode,
+                readBody = { connection.inputStream.bufferedReader().use { it.readText() } },
+                installedVersionCode = BuildConfig.VERSION_CODE.toLong(),
+                variant = BuildConfig.APP_VARIANT,
             )
         } finally {
             connection.disconnect()
@@ -111,21 +88,14 @@ class AppUpdater(
         progress: (Long, Long) -> Unit,
     ) {
         val expected = info.sizeBytes.takeIf { it > 0 }
-        // Fast path: a previous attempt may have finished the bytes but died before
-        // verification — if the size already matches, return and let the caller's
-        // SHA-256 check decide (a mismatch wipes the file; a match skips the network).
-        if (expected != null && partial.isFile && partial.length() == expected && metaMatches(meta, info)) {
+        val downloadState = PartialUpdateDownload(partial, meta)
+        // Clear stale bytes before recording the new artifact identity or connecting.
+        var resumeFrom = downloadState.prepare(info)
+        if (expected != null && resumeFrom == expected) {
             progress(expected, expected)
             return
         }
-        var resumeFrom = 0L
-        if (partial.isFile && partial.length() > 0 && metaMatches(meta, info) &&
-            (expected == null || partial.length() < expected)
-        ) {
-            resumeFrom = partial.length()
-            if (expected != null) progress(resumeFrom, expected)
-        }
-        writeMeta(meta, info)
+        if (resumeFrom > 0 && expected != null) progress(resumeFrom, expected)
         var retriedFresh = false
         while (true) {
             val connection = openDownloadConnection(info.apkUrl, resumeFrom)
@@ -152,9 +122,7 @@ class AppUpdater(
             if (code != 206 && code != 416) error("Update download failed (HTTP $code)")
             check(!retriedFresh) { "Update download failed (HTTP $code)" }
             retriedFresh = true
-            resumeFrom = 0
-            runCatching { partial.delete() }
-            writeMeta(meta, info)
+            resumeFrom = downloadState.reset(info)
         }
     }
 
@@ -210,21 +178,6 @@ class AppUpdater(
             }
         } finally {
             connection.disconnect()
-        }
-    }
-
-    /** True when the sidecar meta proves [partial] belongs to this exact update. */
-    private fun metaMatches(meta: File, info: AppUpdateInfo): Boolean {
-        if (!meta.isFile) return false
-        return runCatching {
-            val root = JSONObject(meta.readText())
-            root.optString("apkUrl") == info.apkUrl && root.optLong("versionCode") == info.versionCode
-        }.getOrDefault(false)
-    }
-
-    private fun writeMeta(meta: File, info: AppUpdateInfo) {
-        runCatching {
-            meta.writeText(JSONObject().put("apkUrl", info.apkUrl).put("versionCode", info.versionCode).toString())
         }
     }
 
