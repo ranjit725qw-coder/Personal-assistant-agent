@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import com.jarves.mh.BuildConfig
 import java.io.File
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -63,22 +64,141 @@ class AppUpdater(
         }
     }
 
-    fun download(info: AppUpdateInfo, progress: (Long, Long) -> Unit, onStage: (String) -> Unit = {}): File {
+    /**
+     * Downloads [info] into a partial file, resuming from previously downloaded
+     * bytes whenever the partial file belongs to this exact update (tracked via a
+     * small sidecar meta file, so a stale partial from an older release is never
+     * resumed). Network failures leave the partial file on disk, so the next
+     * attempt continues where the last one stopped via HTTP Range requests.
+     */
+    fun download(
+        info: AppUpdateInfo,
+        progress: (Long, Long) -> Unit,
+        onStage: (String) -> Unit = {},
+    ): File {
         val directory = File(context.filesDir, "updates").also { it.mkdirs() }
         val partial = File(directory, "mobile-harness-${BuildConfig.APP_VARIANT}.apk.part")
         val target = File(directory, "mobile-harness-${BuildConfig.APP_VARIANT}.apk")
-        val connection = URL(info.apkUrl).openConnection() as HttpURLConnection
+        val meta = File(directory, "${partial.name}.json")
+        // Network errors thrown here intentionally leave `partial` (and `meta`) on
+        // disk so the next attempt resumes instead of starting over.
+        downloadToPartial(info, partial, meta, progress)
         try {
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 30_000
-            connection.instanceFollowRedirects = true
+            if (info.sha256.isNotBlank()) {
+                onStage("Verifying package (SHA-256)\\u2026")
+                val actual = sha256(partial)
+                check(actual.equals(info.sha256, ignoreCase = true)) { "Downloaded APK failed its SHA-256 verification" }
+            }
+            onStage("Verifying app signature\\u2026")
+            verifyApk(partial, info.versionCode)
+        } catch (error: Exception) {
+            // Corrupt bytes must never poison the next attempt: wipe them so the
+            // next tap downloads fresh instead of re-verifying the same bad file.
+            runCatching { partial.delete() }
+            runCatching { meta.delete() }
+            throw error
+        }
+        if (target.exists()) target.delete()
+        check(partial.renameTo(target)) { "Could not prepare the downloaded update" }
+        runCatching { meta.delete() }
+        return target
+    }
+
+    private fun downloadToPartial(
+        info: AppUpdateInfo,
+        partial: File,
+        meta: File,
+        progress: (Long, Long) -> Unit,
+    ) {
+        val expected = info.sizeBytes.takeIf { it > 0 }
+        // Fast path: a previous attempt may have finished the bytes but died before
+        // verification — if the size already matches, return and let the caller's
+        // SHA-256 check decide (a mismatch wipes the file; a match skips the network).
+        if (expected != null && partial.isFile && partial.length() == expected && metaMatches(meta, info)) {
+            progress(expected, expected)
+            return
+        }
+        var resumeFrom = 0L
+        if (partial.isFile && partial.length() > 0 && metaMatches(meta, info) &&
+            (expected == null || partial.length() < expected)
+        ) {
+            resumeFrom = partial.length()
+            if (expected != null) progress(resumeFrom, expected)
+        }
+        writeMeta(meta, info)
+        var retriedFresh = false
+        while (true) {
+            val connection = openDownloadConnection(info.apkUrl, resumeFrom)
             val code = connection.responseCode
-            check(code in 200..299) { "Update download failed (HTTP $code)" }
-            val total = connection.contentLengthLong.takeIf { it > 0 } ?: info.sizeBytes
+            if (code == 200) {
+                // Full body (server ignored Range, or we never sent one): fresh download.
+                val total = connection.contentLengthLong.takeIf { it > 0 } ?: expected ?: -1L
+                consumeToFile(connection, partial, append = false, startOffset = 0, total = total, progress = progress)
+                return
+            }
+            if (code == 206 && resumeFrom > 0 &&
+                parseContentRangeStart(connection.getHeaderField("Content-Range")) == resumeFrom
+            ) {
+                val remaining = connection.contentLengthLong.takeIf { it > 0 }
+                val total = parseContentRangeTotal(connection.getHeaderField("Content-Range"))
+                    ?: (if (remaining != null) resumeFrom + remaining else null)
+                    ?: expected ?: -1L
+                consumeToFile(connection, partial, append = true, startOffset = resumeFrom, total = total, progress = progress)
+                return
+            }
+            // Anything else (416, unexpected 206/offset, 4xx/5xx): retry once from
+            // scratch for offset problems, otherwise fail with the HTTP status.
+            connection.disconnect()
+            if (code != 206 && code != 416) error("Update download failed (HTTP $code)")
+            check(!retriedFresh) { "Update download failed (HTTP $code)" }
+            retriedFresh = true
+            resumeFrom = 0
+            runCatching { partial.delete() }
+            writeMeta(meta, info)
+        }
+    }
+
+    /**
+     * Opens the APK URL, following redirects manually so the Range header is
+     * re-applied on every hop (GitHub release URLs redirect to a signed host,
+     * which would otherwise drop it).
+     */
+    private fun openDownloadConnection(url: String, resumeFrom: Long): HttpURLConnection {
+        var current = url
+        for (i in 0 until 5) {
+            val connection = (URL(current).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 30_000
+                instanceFollowRedirects = false
+                if (resumeFrom > 0) setRequestProperty("Range", "bytes=$resumeFrom-")
+            }
+            val code = connection.responseCode
+            if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                val location = connection.getHeaderField("Location")
+                connection.disconnect()
+                check(!location.isNullOrBlank()) { "Update download failed (redirect without location)" }
+                current = URL(URL(current), location).toString()
+            } else {
+                return connection
+            }
+        }
+        error("Update download failed (too many redirects)")
+    }
+
+    private fun consumeToFile(
+        connection: HttpURLConnection,
+        partial: File,
+        append: Boolean,
+        startOffset: Long,
+        total: Long,
+        progress: (Long, Long) -> Unit,
+    ) {
+        try {
             connection.inputStream.use { input ->
-                partial.outputStream().use { output ->
+                FileOutputStream(partial, append).use { output ->
                     val buffer = ByteArray(128 * 1024)
-                    var downloaded = 0L
+                    var downloaded = startOffset
+                    progress(downloaded, total)
                     while (true) {
                         val count = input.read(buffer)
                         if (count < 0) break
@@ -91,16 +211,33 @@ class AppUpdater(
         } finally {
             connection.disconnect()
         }
-        if (info.sha256.isNotBlank()) {
-            onStage("Verifying package (SHA-256)\\u2026")
-            val actual = sha256(partial)
-            check(actual.equals(info.sha256, ignoreCase = true)) { "Downloaded APK failed its SHA-256 verification" }
+    }
+
+    /** True when the sidecar meta proves [partial] belongs to this exact update. */
+    private fun metaMatches(meta: File, info: AppUpdateInfo): Boolean {
+        if (!meta.isFile) return false
+        return runCatching {
+            val root = JSONObject(meta.readText())
+            root.optString("apkUrl") == info.apkUrl && root.optLong("versionCode") == info.versionCode
+        }.getOrDefault(false)
+    }
+
+    private fun writeMeta(meta: File, info: AppUpdateInfo) {
+        runCatching {
+            meta.writeText(JSONObject().put("apkUrl", info.apkUrl).put("versionCode", info.versionCode).toString())
         }
-        onStage("Verifying app signature\\u2026")
-        verifyApk(partial, info.versionCode)
-        if (target.exists()) target.delete()
-        check(partial.renameTo(target)) { "Could not prepare the downloaded update" }
-        return target
+    }
+
+    /** "bytes 500-999/1000" -> 500 */
+    private fun parseContentRangeStart(header: String?): Long? {
+        val range = header?.substringAfter(' ')?.substringBefore('/')?.trim() ?: return null
+        return range.substringBefore('-').toLongOrNull()
+    }
+
+    /** "bytes 500-999/1000" -> 1000 */
+    private fun parseContentRangeTotal(header: String?): Long? {
+        val total = header?.substringAfterLast('/')?.trim() ?: return null
+        return total.toLongOrNull()?.takeIf { it > 0 }
     }
 
     @Suppress("DEPRECATION")
