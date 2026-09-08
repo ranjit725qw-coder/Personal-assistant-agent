@@ -67,6 +67,8 @@ enum class StartupStage { CHECKING, SETUP_REQUIRED, INSTALLING, MODEL_SETUP, INI
 enum class ApiPingStatus { IDLE, PINGING, OK, FAILED }
 enum class AppUpdateStatus { AVAILABLE, PERMISSION_REQUIRED, DOWNLOADING, INSTALLING, ERROR }
 
+enum class ManualUpdateCheck { IDLE, CHECKING, UP_TO_DATE, AVAILABLE, FAILED }
+
 data class TerminalOutputLine(
     val id: String = java.util.UUID.randomUUID().toString(),
     val command: String,
@@ -156,6 +158,8 @@ data class AppUiState(
     val appUpdateDownloadedBytes: Long = 0L,
     val appUpdateTotalBytes: Long = -1L,
     val appUpdateError: String? = null,
+    val manualUpdateCheck: ManualUpdateCheck = ManualUpdateCheck.IDLE,
+    val manualUpdateCheckMessage: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -930,18 +934,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun checkForAppUpdate(force: Boolean = false) {
-        if (!force && System.currentTimeMillis() - preferences.lastAppUpdateCheckMillis < 24L * 60L * 60L * 1000L) return
+    fun checkForAppUpdate(force: Boolean = false, manual: Boolean = false) {
+        if (_state.value.manualUpdateCheck == ManualUpdateCheck.CHECKING) return
+        if (!force && System.currentTimeMillis() - preferences.lastAppUpdateCheckMillis < APP_UPDATE_CHECK_INTERVAL_MS) return
+        if (manual) _state.update { it.copy(manualUpdateCheck = ManualUpdateCheck.CHECKING, manualUpdateCheckMessage = null) }
         viewModelScope.launch(Dispatchers.IO) {
-            val update = runCatching { appUpdater().check() }.getOrNull()
-            preferences.lastAppUpdateCheckMillis = System.currentTimeMillis()
+            val result = runCatching { appUpdater().check() }
+            // Only stamp successful fetches: a network failure must not blind the
+            // auto-check for the whole throttle window.
+            if (result.isSuccess) preferences.lastAppUpdateCheckMillis = System.currentTimeMillis()
+            val update = result.getOrNull()
             if (update != null) {
                 _state.update {
-                    it.copy(appUpdate = update, appUpdateStatus = AppUpdateStatus.AVAILABLE, appUpdateError = null)
+                    it.copy(
+                        appUpdate = update,
+                        appUpdateStatus = AppUpdateStatus.AVAILABLE,
+                        appUpdateError = null,
+                        manualUpdateCheck = if (manual) ManualUpdateCheck.AVAILABLE else it.manualUpdateCheck,
+                        manualUpdateCheckMessage = if (manual) "v${update.versionName} is ready to install." else it.manualUpdateCheckMessage,
+                    )
+                }
+            } else if (manual) {
+                val failed = result.isFailure
+                _state.update {
+                    it.copy(
+                        manualUpdateCheck = if (failed) ManualUpdateCheck.FAILED else ManualUpdateCheck.UP_TO_DATE,
+                        manualUpdateCheckMessage = if (failed) {
+                            result.exceptionOrNull()?.message?.take(160) ?: "Could not reach the update server. Check your connection."
+                        } else {
+                            "You're on the latest version (v${BuildConfig.VERSION_NAME})."
+                        },
+                    )
                 }
             }
         }
     }
+
+    /** Settings → "Check for Updates": always hits the network, with on-screen feedback. */
+    fun checkForAppUpdateManual() = checkForAppUpdate(force = true, manual = true)
 
     /** Debug builds only: persist a manifest URL override and re-check immediately. */
     fun setDebugUpdateManifestUrl(url: String) {
@@ -2122,6 +2152,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val MINIMUM_INITIALIZATION_SCREEN_MS = 3_000L
+        private const val APP_UPDATE_CHECK_INTERVAL_MS = 6L * 60L * 60L * 1000L
         private const val MAX_VISIBLE_WORKSPACE_ENTRIES = 2_000
         private const val MAX_PROJECT_TERMINAL_HISTORY = 100
         private const val MAX_PROJECT_TERMINAL_OUTPUT = 200_000

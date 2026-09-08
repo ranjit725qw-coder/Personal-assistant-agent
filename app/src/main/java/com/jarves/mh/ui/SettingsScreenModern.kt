@@ -95,7 +95,7 @@ import com.jarves.mh.ui.theme.AppThemeMode
 import com.jarves.mh.ui.theme.PocketOrange
 import kotlinx.coroutines.launch
 
-private enum class SettingsSection { CONNECTION, APPEARANCE, TOOLS, RUNTIME, UPDATE_CHANNEL }
+private enum class SettingsSection { CONNECTION, APPEARANCE, TOOLS, RUNTIME, APP_UPDATE, UPDATE_CHANNEL }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,6 +109,8 @@ fun SettingsScreen(
     onClearTerminal: () -> Unit,
     getSavedApiKey: (ProviderKind) -> String,
     onInstallDevStack: (DevStack) -> Unit = {},
+    onCheckUpdates: () -> Unit = {},
+    onInstallUpdate: () -> Unit = {},
     initialDebugUpdateManifestUrl: String = "",
     onSetDebugUpdateManifestUrl: (String) -> Unit = {},
     onClearDebugUpdateManifestUrl: () -> Unit = {},
@@ -379,6 +381,18 @@ fun SettingsScreen(
 
             item {
                 SettingsAccordion(
+                    title = "App updates",
+                    subtitle = state.appUpdate?.let { "v${it.versionName} available" } ?: "v${BuildConfig.VERSION_NAME} · tap to check",
+                    icon = Icons.Default.Download,
+                    expanded = expanded == SettingsSection.APP_UPDATE,
+                    onClick = { toggle(SettingsSection.APP_UPDATE) },
+                ) {
+                    AppUpdateSection(state = state, onCheckUpdates = onCheckUpdates, onInstallUpdate = onInstallUpdate)
+                }
+            }
+
+            item {
+                SettingsAccordion(
                     title = "Linux runtime",
                     subtitle = "Ubuntu 20.04 PRoot · ARM64",
                     icon = Icons.Default.Terminal,
@@ -641,6 +655,78 @@ private fun ConnectionSettings(
 }
 
 @Composable
+@Composable
+private fun AppUpdateSection(
+    state: AppUiState,
+    onCheckUpdates: () -> Unit,
+    onInstallUpdate: () -> Unit,
+) {
+    RuntimeInfoRow("Installed version", "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · ${BuildConfig.APP_VARIANT}")
+    val update = state.appUpdate
+    if (update != null) {
+        RuntimeInfoRow("Latest version", "v${update.versionName} (${update.versionCode})")
+    }
+    Spacer(Modifier.height(8.dp))
+    Button(
+        onClick = onCheckUpdates,
+        enabled = state.manualUpdateCheck != ManualUpdateCheck.CHECKING,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (state.manualUpdateCheck == ManualUpdateCheck.CHECKING) {
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(8.dp))
+            Text("Checking…")
+        } else {
+            Icon(Icons.Default.Refresh, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(7.dp))
+            Text("Check for Updates")
+        }
+    }
+    state.manualUpdateCheckMessage?.let { message ->
+        val color = when (state.manualUpdateCheck) {
+            ManualUpdateCheck.FAILED -> MaterialTheme.colorScheme.error
+            ManualUpdateCheck.AVAILABLE -> PocketOrange
+            else -> MaterialTheme.colorScheme.onSurfaceVariant
+        }
+        Text(message, fontSize = 12.sp, color = color)
+    }
+    if (update != null) {
+        Spacer(Modifier.height(4.dp))
+        val downloading = state.appUpdateStatus == AppUpdateStatus.DOWNLOADING
+        val installing = state.appUpdateStatus == AppUpdateStatus.INSTALLING
+        Button(
+            onClick = onInstallUpdate,
+            enabled = !downloading && !installing,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                when {
+                    downloading -> "Downloading…"
+                    installing -> "Installing…"
+                    else -> "Update now"
+                },
+            )
+        }
+        if (downloading && state.appUpdateTotalBytes > 0) {
+            val pct = (state.appUpdateDownloadedBytes.toFloat() / state.appUpdateTotalBytes * 100).toInt()
+            Text(
+                "Downloading ${state.appUpdateDownloadedBytes / 1_048_576} / ${state.appUpdateTotalBytes / 1_048_576} MB · $pct%",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (installing) Text("Download verified. Opening Android installer…", fontSize = 12.sp, color = PocketOrange)
+        if (state.appUpdateStatus == AppUpdateStatus.PERMISSION_REQUIRED) {
+            Text(
+                "Allow \u201cInstall unknown apps\u201d for this app in system Settings, then tap Update now again.",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        state.appUpdateError?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
+    }
+}
+
 private fun SelectionDot(selected: Boolean) {
     Box(
         Modifier.size(20.dp).border(if (selected) 2.dp else 1.dp, if (selected) PocketOrange else MaterialTheme.colorScheme.outline, CircleShape),

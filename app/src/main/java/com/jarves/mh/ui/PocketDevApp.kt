@@ -1536,6 +1536,8 @@ private fun RootScreenHost(
                     onClearTerminal = viewModel::clearTerminal,
                     getSavedApiKey = viewModel::getSavedApiKey,
                     onInstallDevStack = viewModel::installDevStack,
+                    onCheckUpdates = viewModel::checkForAppUpdateManual,
+                    onInstallUpdate = viewModel::installAppUpdate,
                     initialDebugUpdateManifestUrl = viewModel.debugUpdateManifestUrl(),
                     onSetDebugUpdateManifestUrl = viewModel::setDebugUpdateManifestUrl,
                     onClearDebugUpdateManifestUrl = viewModel::clearDebugUpdateManifestUrl,
@@ -2348,6 +2350,12 @@ private fun ProjectsScreen(
             title = { Text("Update to ${update.versionName}", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Installed v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) \u2192 v${update.versionName} (${update.versionCode})",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = PocketOrange,
+                    )
                     Text(update.notes.ifBlank { "Get the latest improvements and fixes for Mobile Harness." })
                     if (update.sizeBytes > 0) Text("Download size: ${formatMegabytes(update.sizeBytes)}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                     if (!canInstall) {
