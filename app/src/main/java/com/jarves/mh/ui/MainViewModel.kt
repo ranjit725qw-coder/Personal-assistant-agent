@@ -178,6 +178,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     private val installer = RuntimeInstaller(application)
     private val providerApi = ProviderApiClient()
+    private val fileReadRequests = LatestFileRead()
     private fun appUpdater(): AppUpdater = AppUpdater(
         getApplication(),
         if (BuildConfig.DEBUG) preferences.debugUpdateManifestUrl else "",
@@ -310,7 +311,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     terminalProcess = proc
                     val native = proc as? NativeSpawnProcess
                     var offset = 0L
-                    val streamed = StringBuilder()
+                    val streamed = BoundedTerminalOutput(MAX_PROJECT_TERMINAL_OUTPUT)
                     var autoConfirmed = false
                     while (proc.isAlive || (native?.outputFile?.length() ?: 0L) > offset) {
                         val file = native?.outputFile
@@ -344,7 +345,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     finalOut to exit
                 }.getOrElse { "Error: ${it.message}" to 1 }
             }
-            _terminalLines.update { it + TerminalOutputLine(command = command, output = output, exitCode = exitCode) }
+            _terminalLines.update {
+                (it + TerminalOutputLine(command = command, output = output, exitCode = exitCode))
+                    .takeLast(MAX_PROJECT_TERMINAL_HISTORY)
+            }
             _terminalLiveOutput.value = ""
             _terminalCurrentCommand.value = null
             _isTerminalRunning.value = false
@@ -516,7 +520,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val native = process as? NativeSpawnProcess
             ?: return ProjectTerminalResult("Unsupported terminal process.", 1, cwd)
         var offset = 0L
-        val output = StringBuilder()
+        val output = BoundedTerminalOutput(MAX_PROJECT_TERMINAL_OUTPUT)
         var autoConfirmed = false
         while (process.isAlive || native.outputFile.length() > offset) {
             val available = native.outputFile.length() - offset
@@ -1244,6 +1248,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openProject(project: Project) {
+        closeFile()
         runtime.configureProjectRoot(project.id, project.rootPath)
         val terminal = loadProjectTerminal(project)
         val suggestedRoot = if (project.rootPath.isBlank()) detectNestedProjectRoot(project) else null
@@ -1288,6 +1293,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeProject() {
+        closeFile()
         val active = _state.value.activeProject
         persistMessages()
         if (_state.value.isRunning) {
@@ -1348,6 +1354,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun createProject(name: String) {
         if (name.isBlank()) return
+        closeFile()
         val baseSlug = projectSlug(name)
         val usedSlugs = _state.value.projects.mapTo(mutableSetOf()) { it.slug }
         val slug = generateSequence(1) { it + 1 }
@@ -1457,6 +1464,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val project = current.activeProject ?: return
         val root = current.suggestedProjectRoot ?: return
         if (current.isRunning || current.projectTerminalRunning) return
+        closeFile()
         val updated = project.copy(rootPath = root)
         runtime.configureProjectRoot(updated.id, updated.rootPath)
         val projects = current.projects.map { if (it.id == updated.id) updated else it }
@@ -1603,6 +1611,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openFile(entry: WorkspaceEntry) {
         if (entry.isDirectory) return
         val project = _state.value.activeProject ?: return
+        val request = fileReadRequests.begin(project.id, entry.path)
         _state.update { it.copy(openedFilePath = entry.path, openedFileContent = null, fileContentLoading = true) }
         viewModelScope.launch {
             val content = withContext(Dispatchers.IO) {
@@ -1619,11 +1628,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }.getOrElse { "Could not read file: ${it.message}" }
             }
-            _state.update { it.copy(openedFileContent = content, fileContentLoading = false) }
+            _state.update { current ->
+                if (fileReadRequests.isCurrent(request, current.activeProject?.id, current.openedFilePath)) {
+                    current.copy(openedFileContent = content, fileContentLoading = false)
+                } else current
+            }
         }
     }
 
     fun closeFile() {
+        fileReadRequests.invalidate()
         _state.update { it.copy(openedFilePath = null, openedFileContent = null, fileContentLoading = false) }
     }
 
@@ -1898,7 +1912,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
             if (runtime.acceptFileChange(project.id, path)) {
-                _state.update { current -> current.copy(changes = current.changes.filterNot { it.path == path }) }
+                _state.update { it.copy(changes = it.changes.filterNot { change -> change.path == path }) }
             }
         }
     }
@@ -1972,7 +1986,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun appendWorkItem(current: AppUiState, item: ActivityItem): AppUiState {
         if (isNoisyRuntimeItem(item)) return current
         return current.copy(
-            liveProcess = current.liveProcess.map { if (!it.isComplete) it.copy(isComplete = true) else it } + item,
+            liveProcess = current.liveProcess.map { if (it.isComplete) it else it.copy(isComplete = true) } + item,
             liveThinking = false,
             workSegmentStartedAtMillis = current.workSegmentStartedAtMillis ?: System.currentTimeMillis(),
         )
