@@ -63,7 +63,7 @@ class AppUpdater(
         }
     }
 
-    fun download(info: AppUpdateInfo, progress: (Long, Long) -> Unit): File {
+    fun download(info: AppUpdateInfo, progress: (Long, Long) -> Unit, onStage: (String) -> Unit = {}): File {
         val directory = File(context.filesDir, "updates").also { it.mkdirs() }
         val partial = File(directory, "mobile-harness-${BuildConfig.APP_VARIANT}.apk.part")
         val target = File(directory, "mobile-harness-${BuildConfig.APP_VARIANT}.apk")
@@ -92,9 +92,11 @@ class AppUpdater(
             connection.disconnect()
         }
         if (info.sha256.isNotBlank()) {
+            onStage("Verifying package (SHA-256)\\u2026")
             val actual = sha256(partial)
             check(actual.equals(info.sha256, ignoreCase = true)) { "Downloaded APK failed its SHA-256 verification" }
         }
+        onStage("Verifying app signature\\u2026")
         verifyApk(partial, info.versionCode)
         if (target.exists()) target.delete()
         check(partial.renameTo(target)) { "Could not prepare the downloaded update" }

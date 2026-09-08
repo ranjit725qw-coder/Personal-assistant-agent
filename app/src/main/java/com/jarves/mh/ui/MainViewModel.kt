@@ -53,9 +53,12 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -160,6 +163,8 @@ data class AppUiState(
     val appUpdateError: String? = null,
     val manualUpdateCheck: ManualUpdateCheck = ManualUpdateCheck.IDLE,
     val manualUpdateCheckMessage: String? = null,
+    val appUpdateStage: String? = null,
+    val appUpdatePermissionNote: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -250,6 +255,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     val state: StateFlow<AppUiState> = _state.asStateFlow()
+
+    /** One-shot events asking the UI to open system Settings > "Install unknown apps". */
+    private val openUnknownSourcesSettingsChannel = Channel<Unit>(Channel.BUFFERED)
+    val openUnknownSourcesSettings: Flow<Unit> = openUnknownSourcesSettingsChannel.receiveAsFlow()
+    @Volatile private var awaitingUnknownSourcesReturn = false
 
     private val _terminalLines = MutableStateFlow<List<TerminalOutputLine>>(
         listOf(
@@ -950,6 +960,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         appUpdate = update,
                         appUpdateStatus = AppUpdateStatus.AVAILABLE,
                         appUpdateError = null,
+                        appUpdateStage = null,
+                        appUpdatePermissionNote = null,
                         manualUpdateCheck = if (manual) ManualUpdateCheck.AVAILABLE else it.manualUpdateCheck,
                         manualUpdateCheckMessage = if (manual) "v${update.versionName} is ready to install." else it.manualUpdateCheckMessage,
                     )
@@ -992,34 +1004,95 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Debug builds only: the currently-active manifest URL override (empty = default). */
     fun debugUpdateManifestUrl(): String = if (BuildConfig.DEBUG) preferences.debugUpdateManifestUrl else ""
 
+    /**
+     * Entry point for every "Update now" button (dialog, Settings card, dashboard card).
+     * If Android's "Install unknown apps" permission is missing, we redirect to system
+     * Settings BEFORE downloading; the download starts automatically on return.
+     */
     fun installAppUpdate() {
         val info = _state.value.appUpdate ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getApplication<Application>().packageManager.canRequestPackageInstalls()) {
-            _state.update { it.copy(appUpdateStatus = AppUpdateStatus.PERMISSION_REQUIRED) }
+        val status = _state.value.appUpdateStatus
+        if (status == AppUpdateStatus.DOWNLOADING || status == AppUpdateStatus.INSTALLING) return
+        if (!canInstallPackages()) {
+            awaitingUnknownSourcesReturn = true
+            _state.update {
+                it.copy(
+                    appUpdateStatus = AppUpdateStatus.PERMISSION_REQUIRED,
+                    appUpdateError = null,
+                    appUpdateStage = null,
+                    appUpdatePermissionNote = "Opening system Settings\u2026 enable \u201cInstall unknown apps\u201d, then come back \u2014 download starts automatically.",
+                )
+            }
+            openUnknownSourcesSettingsChannel.trySend(Unit)
             return
         }
-        if (_state.value.appUpdateStatus == AppUpdateStatus.DOWNLOADING) return
+        startAppUpdateDownload(info)
+    }
+
+    /** Fired when the user returns from the system "Install unknown apps" screen. */
+    fun onReturnedFromUnknownSourcesSettings() {
+        if (!awaitingUnknownSourcesReturn) return
+        awaitingUnknownSourcesReturn = false
+        val info = _state.value.appUpdate ?: return
+        val status = _state.value.appUpdateStatus
+        if (status == AppUpdateStatus.DOWNLOADING || status == AppUpdateStatus.INSTALLING) return
+        if (canInstallPackages()) {
+            startAppUpdateDownload(info)
+        } else {
+            _state.update {
+                it.copy(
+                    appUpdateStatus = AppUpdateStatus.PERMISSION_REQUIRED,
+                    appUpdatePermissionNote = "Permission is still off \u2014 tap Update Now to open Settings again.",
+                )
+            }
+        }
+    }
+
+    private fun canInstallPackages(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.O || getApplication<Application>().packageManager.canRequestPackageInstalls()
+
+    private fun startAppUpdateDownload(info: AppUpdateInfo) {
         _state.update {
-            it.copy(appUpdateStatus = AppUpdateStatus.DOWNLOADING, appUpdateDownloadedBytes = 0L, appUpdateTotalBytes = info.sizeBytes, appUpdateError = null)
+            it.copy(
+                appUpdateStatus = AppUpdateStatus.DOWNLOADING,
+                appUpdateDownloadedBytes = 0L,
+                appUpdateTotalBytes = info.sizeBytes,
+                appUpdateError = null,
+                appUpdateStage = null,
+                appUpdatePermissionNote = null,
+            )
         }
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
-                appUpdater().download(info) { downloaded, total ->
-                    _state.update { current -> current.copy(appUpdateDownloadedBytes = downloaded, appUpdateTotalBytes = total) }
-                }
+                appUpdater().download(
+                    info = info,
+                    progress = { downloaded, total ->
+                        _state.update { current -> current.copy(appUpdateDownloadedBytes = downloaded, appUpdateTotalBytes = total) }
+                    },
+                    onStage = { stage ->
+                        _state.update { it.copy(appUpdateStatus = AppUpdateStatus.INSTALLING, appUpdateStage = stage) }
+                    },
+                )
             }.onSuccess { apk ->
-                _state.update { it.copy(appUpdateStatus = AppUpdateStatus.INSTALLING) }
-                runCatching { AndroidAppInstaller.install(getApplication(), apk) }.onFailure { error ->
-                    _state.update { it.copy(appUpdateStatus = AppUpdateStatus.ERROR, appUpdateError = error.message ?: "Could not start the Android installer") }
+                _state.update { it.copy(appUpdateStatus = AppUpdateStatus.INSTALLING, appUpdateStage = "Preparing system installer\u2026") }
+                runCatching {
+                    AndroidAppInstaller.install(getApplication(), apk) { written, total ->
+                        val pct = if (total > 0) ((written.toFloat() / total) * 100).toInt().coerceIn(0, 100) else 0
+                        _state.update { it.copy(appUpdateStage = "Preparing system installer\u2026 $pct%") }
+                    }
+                }.onSuccess {
+                    _state.update { it.copy(appUpdateStage = "Launching installer\u2026") }
+                }.onFailure { error ->
+                    _state.update { it.copy(appUpdateStatus = AppUpdateStatus.ERROR, appUpdateError = error.message ?: "Could not start the Android installer", appUpdateStage = null) }
                 }
             }.onFailure { error ->
-                _state.update { it.copy(appUpdateStatus = AppUpdateStatus.ERROR, appUpdateError = error.message ?: "Update download failed") }
+                _state.update { it.copy(appUpdateStatus = AppUpdateStatus.ERROR, appUpdateError = error.message ?: "Update download failed", appUpdateStage = null) }
             }
         }
     }
 
     fun dismissAppUpdateError() {
-        _state.update { it.copy(appUpdateStatus = AppUpdateStatus.AVAILABLE, appUpdateError = null) }
+        _state.update { it.copy(appUpdateStatus = AppUpdateStatus.AVAILABLE, appUpdateError = null, appUpdateStage = null, appUpdatePermissionNote = null) }
     }
 
     private fun mergeStartupLog(

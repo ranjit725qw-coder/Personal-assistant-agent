@@ -198,6 +198,7 @@ import com.jarves.mh.ui.theme.PocketGreen
 import com.jarves.mh.ui.theme.PocketOrange
 import java.io.ByteArrayInputStream
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 
@@ -1476,6 +1477,19 @@ private fun RootScreenHost(
     val isTerminalRunning by viewModel.isTerminalRunning.collectAsStateWithLifecycle()
     val terminalLiveOutput by viewModel.terminalLiveOutput.collectAsStateWithLifecycle()
     val terminalCurrentCommand by viewModel.terminalCurrentCommand.collectAsStateWithLifecycle()
+    val rootContext = LocalContext.current
+    val unknownSourcesLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        viewModel.onReturnedFromUnknownSourcesSettings()
+    }
+    // Every "Update now" entry point funnels its permission redirect through here, so the
+    // download auto-starts on return no matter which screen launched Settings.
+    LaunchedEffect(Unit) {
+        viewModel.openUnknownSourcesSettings.collect {
+            unknownSourcesLauncher.launch(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${rootContext.packageName}")),
+            )
+        }
+    }
 
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -2151,10 +2165,6 @@ private fun ProjectsScreen(
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
     var name by rememberSaveable { mutableStateOf("") }
     val projects = state.projects
-    val context = LocalContext.current
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        onInstallUpdate()
-    }
     LaunchedEffect(state.appUpdate?.versionCode) {
         if (state.appUpdate != null) showUpdateDialog = true
     }
@@ -2329,7 +2339,7 @@ private fun ProjectsScreen(
     )
     val update = state.appUpdate
     if (showUpdateDialog && update != null) {
-        val canInstall = Build.VERSION.SDK_INT < Build.VERSION_CODES.O || context.packageManager.canRequestPackageInstalls()
+        val awaitingPermission = state.appUpdateStatus == AppUpdateStatus.PERMISSION_REQUIRED
         val downloading = state.appUpdateStatus == AppUpdateStatus.DOWNLOADING
         val installing = state.appUpdateStatus == AppUpdateStatus.INSTALLING
         val total = state.appUpdateTotalBytes
@@ -2349,12 +2359,12 @@ private fun ProjectsScreen(
                     )
                     Text(update.notes.ifBlank { "Get the latest improvements and fixes for Mobile Harness." })
                     if (update.sizeBytes > 0) Text("Download size: ${formatMegabytes(update.sizeBytes)}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                    if (!canInstall) {
-                        Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.65f)) {
+                    if (awaitingPermission) {
+                        Surface(shape = RoundedCornerShape(12.dp), color = PocketOrange.copy(alpha = 0.12f)) {
                             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
-                                Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                                Icon(Icons.Default.Warning, null, tint = PocketOrange, modifier = Modifier.size(20.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("Allow ‘Install unknown apps’ for Mobile Harness. Without this permission, Android will not install the update.", fontSize = 13.sp)
+                                Text(state.appUpdatePermissionNote ?: "Allow \u2018Install unknown apps\u2019 for this app in system Settings.", fontSize = 13.sp)
                             }
                         }
                     }
@@ -2367,24 +2377,16 @@ private fun ProjectsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (installing) Text("Download verified. Opening Android installer…", color = PocketGreen, fontSize = 13.sp)
+                    if (installing) Row(verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp)); Text(state.appUpdateStage ?: "Installing\u2026", color = PocketGreen, fontSize = 13.sp) }
                     state.appUpdateError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
                 }
             },
             confirmButton = {
                 Button(
                     enabled = !downloading && !installing,
-                    onClick = {
-                        if (!canInstall && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            permissionLauncher.launch(
-                                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")),
-                            )
-                        } else {
-                            onInstallUpdate()
-                        }
-                    },
+                    onClick = onInstallUpdate,
                 ) {
-                    Text(when { !canInstall -> "Grant permission"; downloading -> "Downloading…"; installing -> "Installing…"; else -> "Download and install" })
+                    Text(when { awaitingPermission -> "Grant permission"; downloading -> "Downloading…"; installing -> "Installing…"; else -> "Download and install" })
                 }
             },
             dismissButton = { if (!installing) TextButton(onClick = { showUpdateDialog = false }) { Text("Later") } },

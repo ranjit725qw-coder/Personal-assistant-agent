@@ -13,7 +13,7 @@ import java.io.File
 
 /** Installs a locally-built APK through Android's package manager, without ADB. */
 object AndroidAppInstaller {
-    fun install(context: Context, apk: File) {
+    fun install(context: Context, apk: File, onSessionWrite: (writtenBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }) {
         require(apk.isFile && apk.extension.equals("apk", ignoreCase = true) && apk.length() > 0L) {
             "A valid APK was not produced: ${apk.name}"
         }
@@ -46,7 +46,15 @@ object AndroidAppInstaller {
             installer.openSession(sessionId).use { session ->
                 apk.inputStream().use { input ->
                     session.openWrite(apk.name, 0, apk.length()).use { output ->
-                        input.copyTo(output)
+                        val buffer = ByteArray(256 * 1024)
+                        var written = 0L
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                            written += count
+                            onSessionWrite(written, apk.length())
+                        }
                         session.fsync(output)
                     }
                 }

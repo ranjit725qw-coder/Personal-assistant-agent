@@ -744,12 +744,19 @@ private fun AppUpdateSection(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (installing) Text("Download verified. Opening Android installer\u2026", fontSize = 12.sp, color = PocketOrange)
+                if (installing) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(state.appUpdateStage ?: "Installing\u2026", fontSize = 12.sp, color = PocketOrange)
+                    }
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
                 if (state.appUpdateStatus == AppUpdateStatus.PERMISSION_REQUIRED) {
                     Text(
-                        "Allow \u201cInstall unknown apps\u201d for this app in system Settings, then tap Update Now again.",
+                        state.appUpdatePermissionNote ?: "Allow \u201cInstall unknown apps\u201d for this app in system Settings.",
                         fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.error,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 state.appUpdateError?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
