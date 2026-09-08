@@ -15,7 +15,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.graphics.Color
+import com.jarves.mh.ui.theme.PocketOrange
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -42,6 +45,8 @@ fun VoiceInputButton(
     onResult: (String) -> Unit,
 ) {
     val context = LocalContext.current
+    // Idle/off state: black on light theme, muted gray on dark theme (black would vanish there).
+    val idleMicTint = if (isSystemInDarkTheme()) MaterialTheme.colorScheme.onSurfaceVariant else Color.Black
     var listening by remember { mutableStateOf(false) }
     val recognizerRef = remember { arrayOfNulls<SpeechRecognizer>(1) }
 
@@ -149,9 +154,9 @@ fun VoiceInputButton(
             contentDescription = if (listening) "Stop listening" else "Voice input",
             modifier = Modifier.size(20.dp),
             tint = when {
-                listening -> MaterialTheme.colorScheme.error
-                enabled -> MaterialTheme.colorScheme.primary
-                else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                listening -> PocketOrange
+                enabled -> idleMicTint
+                else -> idleMicTint.copy(alpha = 0.4f)
             },
         )
     }

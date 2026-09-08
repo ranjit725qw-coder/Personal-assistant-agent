@@ -156,6 +156,7 @@ sealed interface RuntimeEvent {
 
     data class SessionStarted(override val sessionId: String) : RuntimeEvent
     data class AssistantDelta(override val sessionId: String, val text: String) : RuntimeEvent
+    data class RetractAssistantText(override val sessionId: String, val chars: Int) : RuntimeEvent
     data class ReasoningProgress(override val sessionId: String, val estimatedTokens: Int) : RuntimeEvent
     data class ReasoningSummary(
         override val sessionId: String,

@@ -84,6 +84,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jarves.mh.BuildConfig
+import com.jarves.mh.data.ApiKeyPool
 import com.jarves.mh.model.DevStack
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
@@ -604,11 +605,18 @@ private fun ConnectionSettings(
         Spacer(Modifier.width(7.dp))
         Text(if (models.isEmpty()) "Find available models" else "Available models (${models.size})")
     }
+    val pooledKeyCount = ApiKeyPool.count(apiKey)
     OutlinedTextField(
         apiKey,
         onApiKey,
-        label = { Text("API key") },
-        singleLine = true,
+        label = { Text("API keys") },
+        placeholder = { Text("One key per line \u2014 auto-switches on 429") },
+        supportingText = {
+            if (pooledKeyCount > 1) Text("$pooledKeyCount keys \u2022 switches automatically on rate limit")
+        },
+        singleLine = false,
+        minLines = 1,
+        maxLines = 4,
         visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
         trailingIcon = {

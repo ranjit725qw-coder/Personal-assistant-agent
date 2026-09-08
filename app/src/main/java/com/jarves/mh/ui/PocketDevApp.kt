@@ -1,6 +1,7 @@
 package com.jarves.mh.ui
 
 import android.Manifest
+import com.jarves.mh.data.ApiKeyPool
 import android.app.ActivityManager
 import android.content.Intent
 import android.content.Context
@@ -2050,15 +2051,19 @@ private fun ProviderCredentialsStep(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    val onboardingKeyCount = ApiKeyPool.count(apiKey)
                     OutlinedTextField(
                         apiKey,
                         { onApiKey(it); status = null },
-                        label = { Text("API key") },
-                        placeholder = { Text(if (hasStoredSecret) "Saved securely — leave blank to keep it" else "Enter your API key") },
+                        label = { Text("API keys") },
+                        placeholder = { Text(if (hasStoredSecret) "Saved securely \u2014 leave blank, or paste new keys" else "Enter API keys, one per line") },
                         supportingText = {
-                            if (hasStoredSecret && apiKey.isBlank()) Text("A saved key is ready to use")
+                            if (onboardingKeyCount > 1) Text("$onboardingKeyCount keys \u2022 switches automatically on rate limit")
+                            else if (hasStoredSecret && apiKey.isBlank()) Text("A saved key is ready to use")
                         },
-                        singleLine = true,
+                        singleLine = false,
+                        minLines = 1,
+                        maxLines = 4,
                         visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         modifier = Modifier.fillMaxWidth(),

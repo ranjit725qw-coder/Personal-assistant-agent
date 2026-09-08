@@ -11,7 +11,9 @@ import androidx.lifecycle.viewModelScope
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.jarves.mh.BuildConfig
+import com.jarves.mh.data.ApiKeyPool
 import com.jarves.mh.data.ApiKeyVault
+import com.jarves.mh.data.ExhaustedKeyStore
 import com.jarves.mh.data.AppPreferences
 import com.jarves.mh.model.ActivityItem
 import com.jarves.mh.model.ChangeItem
@@ -159,7 +161,12 @@ data class AppUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val vault = ApiKeyVault(application)
     private val preferences = AppPreferences(application)
-    private val runtime = ClaudeRuntimeBridge(application) { profile -> vault.get(profile.kind.name) }
+    private val exhaustedKeys = ExhaustedKeyStore(application)
+    private val runtime = ClaudeRuntimeBridge(
+        application,
+        poolFor = { profile -> exhaustedKeys.snapshot(profile.kind.name, ApiKeyPool.parse(vault.get(profile.kind.name))) },
+        onKeyExhausted = { profile, key -> exhaustedKeys.markExhausted(profile.kind.name, key) },
+    )
     private val installer = RuntimeInstaller(application)
     private val providerApi = ProviderApiClient()
     private fun appUpdater(): AppUpdater = AppUpdater(
@@ -1094,8 +1101,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** First usable key: a freshly typed pool wins, else the first non-exhausted saved key. */
+    private fun activeKey(profile: ProviderProfile, typed: String): String {
+        ApiKeyPool.parse(typed).firstOrNull()?.let { return it }
+        return exhaustedKeys.snapshot(profile.kind.name, ApiKeyPool.parse(vault.get(profile.kind.name))).available.firstOrNull().orEmpty()
+    }
+
     suspend fun discoverModels(profile: ProviderProfile, secret: String): ModelDiscoveryResult {
-        val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
+        val key = activeKey(profile, secret)
         return providerApi.discoverModels(profile.baseUrl, key, profile.kind.protocol)
     }
 
@@ -1104,7 +1117,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         secret: String,
         models: List<com.jarves.mh.network.DiscoveredModel>,
     ): ConnectionValidation {
-        val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
+        val key = activeKey(profile, secret)
         return providerApi.validate(profile.baseUrl, profile.model, key, profile.kind.protocol, models)
     }
 
@@ -1114,7 +1127,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_state.value.apiPingStatus == ApiPingStatus.PINGING) return
         _state.update { it.copy(apiPingStatus = ApiPingStatus.PINGING, apiPingMessage = "Sending a minimal test request…") }
         viewModelScope.launch {
-            val key = vault.get(profile.kind.name).orEmpty()
+            val key = activeKey(profile, "")
             val result = providerApi.validate(profile.baseUrl, profile.model, key, profile.kind.protocol, emptyList())
             when (result) {
                 is ConnectionValidation.Success -> _state.update {
@@ -1884,6 +1897,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         timeline.copy(messages = timeline.messages.dropLast(1) + lastMessage.copy(text = lastMessage.text + event.text))
                     } else {
                         timeline.copy(messages = timeline.messages + ChatMessage(fromUser = false, text = event.text))
+                    }
+                }
+                is RuntimeEvent.RetractAssistantText -> {
+                    // Failover helper: drop the partial text a rate-limited attempt streamed,
+                    // so the retry's answer continues cleanly instead of duplicating it.
+                    val lastMessage = current.messages.lastOrNull()
+                    if (lastMessage != null && !lastMessage.fromUser && event.chars > 0) {
+                        val trimmed = lastMessage.text.dropLast(event.chars.coerceAtMost(lastMessage.text.length))
+                        if (trimmed.isBlank()) {
+                            current.copy(messages = current.messages.dropLast(1))
+                        } else {
+                            current.copy(messages = current.messages.dropLast(1) + lastMessage.copy(text = trimmed))
+                        }
+                    } else {
+                        current
                     }
                 }
                 is RuntimeEvent.ReasoningProgress -> {

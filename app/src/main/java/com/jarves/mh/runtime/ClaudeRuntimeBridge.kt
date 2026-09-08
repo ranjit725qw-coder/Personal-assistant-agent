@@ -3,6 +3,7 @@ package com.jarves.mh.runtime
 import android.content.Context
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.jarves.mh.data.KeyPoolSnapshot
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.DiffLine
@@ -58,9 +59,40 @@ internal object ProviderRuntimeErrorDetector {
     }
 }
 
+internal object ProviderRateLimitDetector {
+    /** True when a CLI output line or error message signals HTTP 429 / quota exhaustion. */
+    fun isRateLimited(text: String): Boolean {
+        val json = runCatching { JSONObject(text) }.getOrNull()
+        if (json?.optString("subtype") == "api_retry" && json.optInt("error_status") == 429) return true
+        val combined = buildString {
+            append(text)
+            json?.let {
+                append(' ')
+                append(it.optString("error"))
+                append(' ')
+                append(it.optString("message"))
+                append(' ')
+                append(it.optString("result"))
+            }
+        }.lowercase()
+        return "http 429" in combined ||
+            "error 429" in combined ||
+            "status 429" in combined ||
+            " 429 " in combined ||
+            "(429)" in combined ||
+            "429:" in combined ||
+            "rate limit" in combined ||
+            "rate_limit" in combined ||
+            "too many requests" in combined ||
+            "quota exceeded" in combined ||
+            "quota_exceeded" in combined
+    }
+}
+
 class ClaudeRuntimeBridge(
     private val context: Context,
-    private val secretFor: (ProviderProfile) -> String?,
+    private val poolFor: (ProviderProfile) -> KeyPoolSnapshot,
+    private val onKeyExhausted: (ProviderProfile, String) -> Unit,
 ) : RuntimeBridge {
     private val installer = RuntimeInstaller(context)
     private val eventBus = MutableSharedFlow<RuntimeEvent>(extraBufferCapacity = 64)
@@ -78,6 +110,7 @@ class ClaudeRuntimeBridge(
     @Volatile private var lastForegroundProgressAt: Long = 0L
     @Volatile private var foregroundResultPosted: Boolean = false
     private val streamedText = StringBuilder()
+    private var attemptEmittedChars = 0
     private val streamedThinking = StringBuilder()
     private var lastReasoningTokens = 0
     private var lastReasoningUpdateAt = 0L
@@ -102,13 +135,21 @@ class ClaudeRuntimeBridge(
         streamedThinking.clear()
         eventBus.emit(RuntimeEvent.SessionStarted(sessionId))
         pushForegroundProgress("Starting Claude Code…")
-        val secret = secretFor(provider).orEmpty()
-        if (provider.kind != ProviderKind.CLAUDE && secret.isBlank()) {
+        val poolSnapshot = if (provider.kind == ProviderKind.CLAUDE) KeyPoolSnapshot(listOf(""), 0) else poolFor(provider)
+        if (provider.kind != ProviderKind.CLAUDE && poolSnapshot.total == 0) {
             eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "No API key is saved for ${provider.kind.title}."))
             return@withContext sessionId
         }
+        if (provider.kind != ProviderKind.CLAUDE && poolSnapshot.available.isEmpty()) {
+            eventBus.emit(
+                RuntimeEvent.SessionFailed(
+                    sessionId,
+                    "All ${poolSnapshot.total} API keys hit their limit today. They reset automatically tomorrow \u2014 or add a fresh key in Settings.",
+                ),
+            )
+            return@withContext sessionId
+        }
 
-        var formatGateway: LocalFormatGateway? = null
         runCatching {
             RuntimeTaskController.stopAction = {
                 userStopRequested = true
@@ -130,116 +171,40 @@ class ClaudeRuntimeBridge(
             val workspace = ensureWorkspace(projectId)
             createCheckpoint(projectId, workspace)
             val before = snapshot(workspace)
-            formatGateway = if (provider.kind.protocol in setOf(
-                    com.jarves.mh.model.ProviderProtocol.OPENAI_CHAT,
-                    com.jarves.mh.model.ProviderProtocol.OPENAI_RESPONSES,
-                )) LocalFormatGateway(provider, secret).start() else null
-            val launch = RuntimeLaunchConfigBuilder.build(provider, authToken = secret, localGatewayUrl = formatGateway?.url)
-            Log.d("ClaudeBridge", "Provider: ${provider.kind}, Model: ${provider.model}, BaseUrl: ${provider.baseUrl}")
-            Log.d("ClaudeBridge", "Launch environment keys: ${launch.environment.keys}")
-
-            // Build a context-aware prompt that includes conversation history
-            val guestWorkspacePath = "/workspace/$projectSlug"
-            val contextPrompt = buildContextPrompt(prompt, conversationHistory, guestWorkspacePath, projectKind)
-
-            val command = buildList {
-                add(launch.executable)
-                add("--bare")
-                add("-p")
-                add(contextPrompt)
-                add("--output-format")
-                add("stream-json")
-                add("--include-partial-messages")
-                add("--verbose")
-                add("--model")
-                add(launch.environment["ANTHROPIC_MODEL"] ?: provider.model)
-                add("--max-turns")
-                add("25")
-            }
-            Log.d("ClaudeBridge", "Launching command: $command")
-            val process = installer.process(
-                installed.proot,
-                installed.rootfs,
-                workspace,
-                launch.environment,
-                command,
-                guestWorkspacePath = guestWorkspacePath,
-            )
-            activeProcess = process
-            if (userStopRequested) process.destroy()
-            coroutineScope {
-                val permissionWatcher = launch { watchPermissionRequests(sessionId) }
-                var lastDiagnostic = ""
-                val pendingOutput = StringBuilder()
-                val nativeProcess = process as? NativeSpawnProcess
-                    ?: error("Unsupported Android runtime process")
-                var outputOffset = 0L
-                while (process.isAlive || nativeProcess.outputFile.length() > outputOffset) {
-                    val available = nativeProcess.outputFile.length() - outputOffset
-                    if (available <= 0) {
-                        delay(50)
-                        continue
-                    }
-                    val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
-                    val count = RandomAccessFile(nativeProcess.outputFile, "r").use { file ->
-                        file.seek(outputOffset)
-                        file.read(bytes)
-                    }
-                    if (count > 0) {
-                        outputOffset += count
-                        pendingOutput.append(bytes.decodeToString(0, count))
-                        var newline = pendingOutput.indexOf("\n")
-                        while (newline >= 0) {
-                            val line = pendingOutput.substring(0, newline).trimEnd('\r')
-                            pendingOutput.delete(0, newline + 1)
-                            if (line.isNotBlank()) {
-                                Log.d("ClaudeBridge", "OUTPUT: $line")
-                                ProviderRuntimeErrorDetector.detect(line)?.let { reason ->
-                                    process.destroyForcibly()
-                                    throw ProviderSessionException(reason)
-                                }
-                                if (!consumeClaudeEvent(sessionId, line)) {
-                                    lastDiagnostic = line.takeLast(500)
-                                    terminalStatus(line)?.let { (title, detail) ->
-                                        eventBus.emit(RuntimeEvent.RuntimeLog(sessionId, title, detail))
-                                    }
-                                }
-                            }
-                            newline = pendingOutput.indexOf("\n")
-                        }
-                    }
-                }
-                pendingOutput.toString().trim().takeIf(String::isNotBlank)?.let { line ->
-                    Log.d("ClaudeBridge", "TRAILING OUTPUT: $line")
-                    if (!consumeClaudeEvent(sessionId, line)) lastDiagnostic = line.takeLast(500)
-                }
-                val exit = process.waitFor()
-                Log.d("ClaudeBridge", "Process exited with code $exit")
-                permissionWatcher.cancelAndJoin()
-                pending.values.filter { it.request.sessionId == sessionId }.forEach { permission ->
-                    permission.response.writeText("deny")
-                    pending.remove(permission.request.approvalId)
-                }
-                val changed = changedFiles(workspace, before)
-                if (changed.isNotEmpty()) {
-                    Log.d("ClaudeBridge", "Changed files: $changed")
-                    saveChangedPaths(projectId, changed)
-                    val details = loadPendingChanges(projectId)
-                    eventBus.emit(RuntimeEvent.FilesChanged(sessionId, details))
-                } else if (!File(checkpointDir(projectId), "changes.json").isFile) {
-                    acceptLastChanges(projectId)
-                }
-                if (exit == 0) {
-                    emitCompletedOnce(sessionId)
-                    finishForegroundRuntime(
-                        completed = true,
-                        projectName = projectSlug,
-                        detail = "Claude Code finished the task in $projectSlug.",
-                    )
-                } else {
+            val attempts = if (provider.kind == ProviderKind.CLAUDE) listOf("") else poolSnapshot.available
+            var completed = false
+            var rateLimited = false
+            for ((attemptIndex, attemptSecret) in attempts.withIndex()) {
+                try {
+                    runClaudeAttempt(sessionId, projectId, projectSlug, projectKind, prompt, conversationHistory, provider, attemptSecret, installed, workspace, before)
+                    completed = true
+                    break
+                } catch (rateLimit: RateLimitExceededException) {
                     if (userStopRequested) throw ProviderSessionException("Stopped by user")
-                    error(lastDiagnostic.ifBlank { "Claude Code stopped with exit code $exit" })
+                    rateLimited = true
+                    if (provider.kind != ProviderKind.CLAUDE) onKeyExhausted(provider, attemptSecret)
+                    if (attemptEmittedChars > 0) {
+                        eventBus.emit(RuntimeEvent.RetractAssistantText(sessionId, attemptEmittedChars))
+                        attemptEmittedChars = 0
+                    }
+                    if (attemptIndex < attempts.lastIndex) {
+                        eventBus.emit(
+                            RuntimeEvent.RuntimeLog(
+                                sessionId,
+                                "API key ${attemptIndex + 1} rate-limited (429)",
+                                "Switching to key ${attemptIndex + 2} of ${attempts.size} \u2014 task continues\u2026",
+                            ),
+                        )
+                        pushForegroundProgress("Switching API key (${attemptIndex + 2}/${attempts.size})\u2026")
+                    }
                 }
+            }
+            if (!completed && rateLimited) {
+                val totalKeys = poolSnapshot.total
+                throw ProviderSessionException(
+                    if (totalKeys > 1) "All $totalKeys API keys hit the provider rate limit (429) today. Keys reset automatically tomorrow \u2014 or add a fresh key in Settings to continue now."
+                    else "The API key hit the provider rate limit (429). It resets automatically \u2014 try again later, or add another key in Settings for automatic failover.",
+                )
             }
         }.onFailure { error ->
             Log.e("ClaudeBridge", "Session failed", error)
@@ -255,7 +220,6 @@ class ClaudeRuntimeBridge(
                 )
             }
         }
-        formatGateway?.close()
         activeProcess = null
         activeSessionId = null
         RuntimeTaskController.stopAction = null
@@ -427,6 +391,7 @@ class ClaudeRuntimeBridge(
                     }
                     "text_delta", "" -> delta.optString("text").takeIf(String::isNotEmpty)?.let {
                         streamedText.append(it)
+                        attemptEmittedChars += it.length
                         eventBus.emit(RuntimeEvent.AssistantDelta(sessionId, it))
                     }
                 }
@@ -444,6 +409,7 @@ class ClaudeRuntimeBridge(
                     when (block.optString("type")) {
                         "text" -> if (streamedText.isEmpty()) {
                             block.optString("text").takeIf(String::isNotBlank)?.let {
+                                attemptEmittedChars += it.length
                                 eventBus.emit(RuntimeEvent.AssistantDelta(sessionId, it))
                             }
                         }
@@ -489,6 +455,7 @@ class ClaudeRuntimeBridge(
             "result" -> {
                 if (json.optBoolean("is_error")) {
                     val message = json.optString("result").ifBlank { "Claude Code reported an error" }
+                    if (ProviderRateLimitDetector.isRateLimited(message)) throw RateLimitExceededException(message)
                     throw IllegalStateException(message)
                 }
                 // The structured result is Claude Code's authoritative terminal event.
@@ -992,6 +959,154 @@ class ClaudeRuntimeBridge(
     }
 
     private data class PendingPermission(val request: ToolRequest, val response: File)
+    /**
+     * One CLI attempt with one API key. Throws [RateLimitExceededException]
+     * when the provider answers 429 so the caller can fail over to the next
+     * pooled key; any other error fails the session immediately.
+     */
+    private suspend fun runClaudeAttempt(
+        sessionId: String,
+        projectId: String,
+        projectSlug: String,
+        projectKind: ProjectKind,
+        prompt: String,
+        conversationHistory: List<ChatMessage>,
+        provider: ProviderProfile,
+        attemptSecret: String,
+        installed: InstalledRuntime,
+        workspace: File,
+        before: Map<String, String>,
+    ) {
+        // Fresh key attempt: partial-text accounting restarts so a later
+        // failover retracts exactly what this attempt streamed.
+        attemptEmittedChars = 0
+        var formatGateway: LocalFormatGateway? = null
+        try {
+            formatGateway = if (provider.kind.protocol in setOf(
+                    com.jarves.mh.model.ProviderProtocol.OPENAI_CHAT,
+                    com.jarves.mh.model.ProviderProtocol.OPENAI_RESPONSES,
+                )) LocalFormatGateway(provider, attemptSecret).start() else null
+            val launch = RuntimeLaunchConfigBuilder.build(provider, authToken = attemptSecret, localGatewayUrl = formatGateway?.url)
+            Log.d("ClaudeBridge", "Provider: ${provider.kind}, Model: ${provider.model}, BaseUrl: ${provider.baseUrl}")
+            Log.d("ClaudeBridge", "Launch environment keys: ${launch.environment.keys}")
+
+            // Build a context-aware prompt that includes conversation history
+            val guestWorkspacePath = "/workspace/$projectSlug"
+            val contextPrompt = buildContextPrompt(prompt, conversationHistory, guestWorkspacePath, projectKind)
+
+            val command = buildList {
+                add(launch.executable)
+                add("--bare")
+                add("-p")
+                add(contextPrompt)
+                add("--output-format")
+                add("stream-json")
+                add("--include-partial-messages")
+                add("--verbose")
+                add("--model")
+                add(launch.environment["ANTHROPIC_MODEL"] ?: provider.model)
+                add("--max-turns")
+                add("25")
+            }
+            Log.d("ClaudeBridge", "Launching command: $command")
+            val process = installer.process(
+                installed.proot,
+                installed.rootfs,
+                workspace,
+                launch.environment,
+                command,
+                guestWorkspacePath = guestWorkspacePath,
+            )
+            activeProcess = process
+            if (userStopRequested) process.destroy()
+            coroutineScope {
+                val permissionWatcher = launch { watchPermissionRequests(sessionId) }
+                var lastDiagnostic = ""
+                val pendingOutput = StringBuilder()
+                val nativeProcess = process as? NativeSpawnProcess
+                    ?: error("Unsupported Android runtime process")
+                var outputOffset = 0L
+                while (process.isAlive || nativeProcess.outputFile.length() > outputOffset) {
+                    val available = nativeProcess.outputFile.length() - outputOffset
+                    if (available <= 0) {
+                        delay(50)
+                        continue
+                    }
+                    val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
+                    val count = RandomAccessFile(nativeProcess.outputFile, "r").use { file ->
+                        file.seek(outputOffset)
+                        file.read(bytes)
+                    }
+                    if (count > 0) {
+                        outputOffset += count
+                        pendingOutput.append(bytes.decodeToString(0, count))
+                        var newline = pendingOutput.indexOf("\n")
+                        while (newline >= 0) {
+                            val line = pendingOutput.substring(0, newline).trimEnd('\r')
+                            pendingOutput.delete(0, newline + 1)
+                            if (line.isNotBlank()) {
+                                Log.d("ClaudeBridge", "OUTPUT: $line")
+                                ProviderRuntimeErrorDetector.detect(line)?.let { reason ->
+                                    process.destroyForcibly()
+                                    throw ProviderSessionException(reason)
+                                }
+                                if (ProviderRateLimitDetector.isRateLimited(line)) {
+                                    process.destroyForcibly()
+                                    throw RateLimitExceededException("Provider rate limit reached (429)")
+                                }
+                                if (!consumeClaudeEvent(sessionId, line)) {
+                                    lastDiagnostic = line.takeLast(500)
+                                    terminalStatus(line)?.let { (title, detail) ->
+                                        eventBus.emit(RuntimeEvent.RuntimeLog(sessionId, title, detail))
+                                    }
+                                }
+                            }
+                            newline = pendingOutput.indexOf("\n")
+                        }
+                    }
+                }
+                pendingOutput.toString().trim().takeIf(String::isNotBlank)?.let { line ->
+                    Log.d("ClaudeBridge", "TRAILING OUTPUT: $line")
+                    if (!consumeClaudeEvent(sessionId, line)) lastDiagnostic = line.takeLast(500)
+                }
+                val exit = process.waitFor()
+                Log.d("ClaudeBridge", "Process exited with code $exit")
+                permissionWatcher.cancelAndJoin()
+                pending.values.filter { it.request.sessionId == sessionId }.forEach { permission ->
+                    permission.response.writeText("deny")
+                    pending.remove(permission.request.approvalId)
+                }
+                val changed = changedFiles(workspace, before)
+                if (changed.isNotEmpty()) {
+                    Log.d("ClaudeBridge", "Changed files: $changed")
+                    saveChangedPaths(projectId, changed)
+                    val details = loadPendingChanges(projectId)
+                    eventBus.emit(RuntimeEvent.FilesChanged(sessionId, details))
+                } else if (!File(checkpointDir(projectId), "changes.json").isFile) {
+                    acceptLastChanges(projectId)
+                }
+                if (exit == 0) {
+                    emitCompletedOnce(sessionId)
+                    finishForegroundRuntime(
+                        completed = true,
+                        projectName = projectSlug,
+                        detail = "Claude Code finished the task in $projectSlug.",
+                    )
+                } else {
+                    if (userStopRequested) throw ProviderSessionException("Stopped by user")
+                    if (ProviderRateLimitDetector.isRateLimited(lastDiagnostic)) {
+                        throw RateLimitExceededException(lastDiagnostic.takeLast(300))
+                    }
+                    error(lastDiagnostic.ifBlank { "Claude Code stopped with exit code $exit" })
+                }
+            }
+        } finally {
+            runCatching { formatGateway?.close() }
+        }
+    }
+
+    private class RateLimitExceededException(message: String) : IllegalStateException(message)
+
     private class ProviderSessionException(message: String) : IllegalStateException(message)
 
     companion object {
