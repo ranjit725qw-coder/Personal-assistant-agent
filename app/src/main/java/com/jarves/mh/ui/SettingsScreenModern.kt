@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LightMode
@@ -655,7 +656,6 @@ private fun ConnectionSettings(
 }
 
 @Composable
-@Composable
 private fun AppUpdateSection(
     state: AppUiState,
     onCheckUpdates: () -> Unit,
@@ -727,6 +727,7 @@ private fun AppUpdateSection(
     }
 }
 
+@Composable
 private fun SelectionDot(selected: Boolean) {
     Box(
         Modifier.size(20.dp).border(if (selected) 2.dp else 1.dp, if (selected) PocketOrange else MaterialTheme.colorScheme.outline, CircleShape),
