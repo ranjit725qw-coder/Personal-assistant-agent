@@ -620,25 +620,13 @@ private fun ConnectionSettings(
         Spacer(Modifier.width(7.dp))
         Text(if (models.isEmpty()) "Find available models" else "Available models (${models.size})")
     }
-    val pooledKeyCount = ApiKeyPool.count(apiKey)
-    OutlinedTextField(
-        apiKey,
-        onApiKey,
-        label = { Text("API keys") },
-        placeholder = { Text("One key per line \u2014 auto-switches on 429") },
-        supportingText = {
-            if (pooledKeyCount > 1) Text("$pooledKeyCount keys \u2022 switches automatically on rate limit")
-        },
-        singleLine = false,
-        minLines = 1,
-        maxLines = 4,
-        visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-        trailingIcon = {
-            IconButton(onClick = onToggleKey) { Icon(if (keyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility, "Show or hide key") }
-        },
-        modifier = Modifier.fillMaxWidth(),
+    ApiKeyListEditor(
+        value = apiKey,
+        onValueChange = onApiKey,
+        keyVisible = keyVisible,
+        onToggleVisibility = onToggleKey,
     )
+
     if (status != null) {
         Text(status, fontSize = 12.sp, color = if (statusOk) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
     }
@@ -661,69 +649,130 @@ private fun AppUpdateSection(
     onCheckUpdates: () -> Unit,
     onInstallUpdate: () -> Unit,
 ) {
-    RuntimeInfoRow("Installed version", "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · ${BuildConfig.APP_VARIANT}")
     val update = state.appUpdate
+    val check = state.manualUpdateCheck
+    RuntimeInfoRow("Installed version", "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) \u00b7 ${BuildConfig.APP_VARIANT}")
     if (update != null) {
         RuntimeInfoRow("Latest version", "v${update.versionName} (${update.versionCode})")
     }
     Spacer(Modifier.height(8.dp))
+
+    // --- Status badge: explicit visual response to every check -----------------
+    val badgeColor = when {
+        update != null -> PocketOrange
+        check == ManualUpdateCheck.UP_TO_DATE -> Color(0xFF58C9A3)
+        check == ManualUpdateCheck.FAILED -> MaterialTheme.colorScheme.error
+        check == ManualUpdateCheck.CHECKING -> PocketOrange
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.fillMaxWidth().padding(13.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(8.dp).background(badgeColor, CircleShape))
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    when {
+                        update != null -> "Update available"
+                        check == ManualUpdateCheck.UP_TO_DATE -> "No new updates available"
+                        check == ManualUpdateCheck.FAILED -> "Update check failed"
+                        check == ManualUpdateCheck.CHECKING -> "Checking for updates\u2026"
+                        else -> "Not checked yet"
+                    },
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            when {
+                update != null -> {
+                    Text(
+                        "Installed: v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) \u2192 Latest: v${update.versionName} (${update.versionCode})",
+                        fontSize = 12.sp,
+                    )
+                    if (update.notes.isNotBlank()) {
+                        Text(update.notes, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                check == ManualUpdateCheck.UP_TO_DATE -> {
+                    Text("Current Version: v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) (Installed)", fontSize = 12.sp)
+                    Text("Status: No new updates available (You are on the latest version)", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                check == ManualUpdateCheck.FAILED -> {
+                    Text(
+                        state.manualUpdateCheckMessage ?: "Could not reach the update server.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Text("Check your connection, then tap Check for Updates to retry.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                check == ManualUpdateCheck.CHECKING -> {
+                    Text("Contacting GitHub releases\u2026", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                else -> {
+                    Text("Automatic checks run every 6 hours. Tap below to check right now.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            // --- One-tap install + progress whenever an update is known --------------
+            if (update != null) {
+                Spacer(Modifier.height(4.dp))
+                val downloading = state.appUpdateStatus == AppUpdateStatus.DOWNLOADING
+                val installing = state.appUpdateStatus == AppUpdateStatus.INSTALLING
+                Button(
+                    onClick = onInstallUpdate,
+                    enabled = !downloading && !installing,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (downloading || installing) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                    } else {
+                        Icon(Icons.Default.Download, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(7.dp))
+                    }
+                    Text(
+                        when {
+                            downloading -> "Downloading\u2026"
+                            installing -> "Installing\u2026"
+                            else -> "Update Now"
+                        },
+                    )
+                }
+                if (downloading && state.appUpdateTotalBytes > 0) {
+                    val fraction = state.appUpdateDownloadedBytes.toFloat() / state.appUpdateTotalBytes
+                    LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                    Text(
+                        "Downloading ${state.appUpdateDownloadedBytes / 1_048_576} / ${state.appUpdateTotalBytes / 1_048_576} MB \u00b7 ${(fraction * 100).toInt()}%",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (installing) Text("Download verified. Opening Android installer\u2026", fontSize = 12.sp, color = PocketOrange)
+                if (state.appUpdateStatus == AppUpdateStatus.PERMISSION_REQUIRED) {
+                    Text(
+                        "Allow \u201cInstall unknown apps\u201d for this app in system Settings, then tap Update Now again.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                state.appUpdateError?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
+            }
+        }
+    }
+    Spacer(Modifier.height(8.dp))
+
+    // --- Manual check ------------------------------------------------------
     Button(
         onClick = onCheckUpdates,
-        enabled = state.manualUpdateCheck != ManualUpdateCheck.CHECKING,
+        enabled = check != ManualUpdateCheck.CHECKING,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        if (state.manualUpdateCheck == ManualUpdateCheck.CHECKING) {
+        if (check == ManualUpdateCheck.CHECKING) {
             CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
             Spacer(Modifier.width(8.dp))
-            Text("Checking…")
+            Text("Checking\u2026")
         } else {
             Icon(Icons.Default.Refresh, null, Modifier.size(18.dp))
             Spacer(Modifier.width(7.dp))
             Text("Check for Updates")
         }
-    }
-    state.manualUpdateCheckMessage?.let { message ->
-        val color = when (state.manualUpdateCheck) {
-            ManualUpdateCheck.FAILED -> MaterialTheme.colorScheme.error
-            ManualUpdateCheck.AVAILABLE -> PocketOrange
-            else -> MaterialTheme.colorScheme.onSurfaceVariant
-        }
-        Text(message, fontSize = 12.sp, color = color)
-    }
-    if (update != null) {
-        Spacer(Modifier.height(4.dp))
-        val downloading = state.appUpdateStatus == AppUpdateStatus.DOWNLOADING
-        val installing = state.appUpdateStatus == AppUpdateStatus.INSTALLING
-        Button(
-            onClick = onInstallUpdate,
-            enabled = !downloading && !installing,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(
-                when {
-                    downloading -> "Downloading…"
-                    installing -> "Installing…"
-                    else -> "Update now"
-                },
-            )
-        }
-        if (downloading && state.appUpdateTotalBytes > 0) {
-            val pct = (state.appUpdateDownloadedBytes.toFloat() / state.appUpdateTotalBytes * 100).toInt()
-            Text(
-                "Downloading ${state.appUpdateDownloadedBytes / 1_048_576} / ${state.appUpdateTotalBytes / 1_048_576} MB · $pct%",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        if (installing) Text("Download verified. Opening Android installer…", fontSize = 12.sp, color = PocketOrange)
-        if (state.appUpdateStatus == AppUpdateStatus.PERMISSION_REQUIRED) {
-            Text(
-                "Allow \u201cInstall unknown apps\u201d for this app in system Settings, then tap Update now again.",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-        state.appUpdateError?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
     }
 }
 

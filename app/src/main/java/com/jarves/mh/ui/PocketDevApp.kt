@@ -2053,23 +2053,14 @@ private fun ProviderCredentialsStep(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    val onboardingKeyCount = ApiKeyPool.count(apiKey)
-                    OutlinedTextField(
-                        apiKey,
-                        { onApiKey(it); status = null },
-                        label = { Text("API keys") },
-                        placeholder = { Text(if (hasStoredSecret) "Saved securely \u2014 leave blank, or paste new keys" else "Enter API keys, one per line") },
-                        supportingText = {
-                            if (onboardingKeyCount > 1) Text("$onboardingKeyCount keys \u2022 switches automatically on rate limit")
-                            else if (hasStoredSecret && apiKey.isBlank()) Text("A saved key is ready to use")
-                        },
-                        singleLine = false,
-                        minLines = 1,
-                        maxLines = 4,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        modifier = Modifier.fillMaxWidth(),
+                    ApiKeyListEditor(
+                        value = apiKey,
+                        onValueChange = { onApiKey(it); status = null },
+                        keyVisible = false,
+                        onToggleVisibility = null,
+                        hasStoredSecret = hasStoredSecret,
                     )
+
                     OutlinedTextField(
                         model,
                         { onModel(it); status = null },
