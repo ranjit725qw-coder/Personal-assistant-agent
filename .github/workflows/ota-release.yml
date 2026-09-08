@@ -1,9 +1,15 @@
-# OTA Release pipeline for Personal Assistant.
-# Every push to main that touches the app builds a SIGNED release APK,
-# publishes a GitHub Release (tag ota-<versionCode>) with the APK +
+# OTA Release pipeline for Personal Assistant (ONLINE edition).
+# Every push to main that touches the app builds a small SIGNED online APK
+# (~45 MB), publishes a GitHub Release (tag ota-<versionCode>) with the APK +
 # mobile-harness-update.json, so the installed app auto-detects the update
 # and offers one-click in-app update (Phase 1: dashboard card).
-name: OTA Release (signed)
+#
+# Runtime (Ubuntu/Python/Android) is downloaded once on first launch and lives
+# in app-private storage, which Android preserves across APK updates — so
+# every OTA after that costs only ~45 MB. The manifest carries the online APK
+# under BOTH "online" and "offline" keys so phones still on the old offline
+# build (ota-101) migrate seamlessly with runtime intact.
+name: OTA Release (signed, online)
 
 on:
   push:
@@ -45,32 +51,20 @@ jobs:
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
         shell: bash
 
-      - name: Download runtime bundles (offline flavor)
-        run: |
-          mkdir -p dist/runtime-bundles
-          BASE="https://github.com/techjarves/Mobile-Harness/releases/download/runtime-2026.09.4"
-          curl -L --fail --retry 3 -o dist/runtime-bundles/pocketdev-core-arm64-2026.09.4.tar.zst "$BASE/pocketdev-core-arm64-2026.09.4.tar.zst"
-          curl -L --fail --retry 3 -o dist/runtime-bundles/pocketdev-python-arm64-2026.09.2.tar.zst "$BASE/pocketdev-python-arm64-2026.09.2.tar.zst"
-          curl -L --fail --retry 3 -o dist/runtime-bundles/pocketdev-android-arm64-2026.09.1.tar.zst "$BASE/pocketdev-android-arm64-2026.09.1.tar.zst"
-          echo "6b60d21c3441fe0b127baadded253371fa585525e60871fb814ca29b4fed0de0  dist/runtime-bundles/pocketdev-core-arm64-2026.09.4.tar.zst" | sha256sum -c -
-          echo "6b3f56f7743fec142bc045db3ea561ee83fe89af87c2799165ef60351164ef85  dist/runtime-bundles/pocketdev-python-arm64-2026.09.2.tar.zst" | sha256sum -c -
-          echo "01bea058ebcb17416d1eb08c0211b3782da3228eb3c8348eb3719f2d61dd3ec6  dist/runtime-bundles/pocketdev-android-arm64-2026.09.1.tar.zst" | sha256sum -c -
-        shell: bash
-
       - name: Restore release keystore
         run: |
           echo "${{ secrets.MH_UPLOAD_KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
           echo "Keystore restored: $(wc -c < "$RUNNER_TEMP/release.jks") bytes"
         shell: bash
 
-      - name: Build signed release APK
+      - name: Build signed online APK (~45 MB)
         run: |
           chmod +x gradlew
           CODE=$((100 + GITHUB_RUN_NUMBER))
           NAME="1.1.${GITHUB_RUN_NUMBER}"
           echo "OTA_CODE=$CODE" >> "$GITHUB_ENV"
           echo "OTA_NAME=$NAME" >> "$GITHUB_ENV"
-          ./gradlew assembleOfflineRelease -PappVersionCode="$CODE" -PappVersionName="$NAME" --stacktrace
+          ./gradlew assembleOnlineRelease -PappVersionCode="$CODE" -PappVersionName="$NAME" --stacktrace
         shell: bash
         env:
           MH_UPLOAD_STORE_FILE: ${{ runner.temp }}/release.jks
@@ -80,10 +74,10 @@ jobs:
 
       - name: Prepare release files (APK + manifest + notes)
         run: |
-          APK_SRC="app/build/outputs/apk/offline/release/app-offline-release.apk"
+          APK_SRC="app/build/outputs/apk/online/release/app-online-release.apk"
           test -f "$APK_SRC" || { echo "APK not found!"; exit 1; }
           mkdir -p dist/ota
-          APK="dist/ota/personal-assistant-offline-v${OTA_CODE}.apk"
+          APK="dist/ota/personal-assistant-online-v${OTA_CODE}.apk"
           cp "$APK_SRC" "$APK"
           SHA=$(sha256sum "$APK" | cut -d' ' -f1)
           SIZE=$(wc -c < "$APK")
@@ -94,17 +88,13 @@ jobs:
           import json, sys
           code, name, sha, size = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
           notes = open("dist/ota/changelog.txt", encoding="utf-8").read().strip()
+          url = f"https://github.com/ranjit725qw-coder/Personal-assistant-agent/releases/download/ota-{code}/personal-assistant-online-v{code}.apk"
+          artifact = {"url": url, "sha256": sha, "sizeBytes": size}
           manifest = {
               "versionCode": int(code),
               "versionName": name,
-              "notes": f"Personal Assistant {name} (OTA {code}). Latest changes:\n{notes}",
-              "artifacts": {
-                  "offline": {
-                      "url": f"https://github.com/ranjit725qw-coder/Personal-assistant-agent/releases/download/ota-{code}/personal-assistant-offline-v{code}.apk",
-                      "sha256": sha,
-                      "sizeBytes": size,
-                  }
-              },
+              "notes": f"Personal Assistant {name} (OTA {code}, online edition ~45 MB). Latest changes:\n{notes}",
+              "artifacts": {"online": artifact, "offline": artifact},
           }
           open("dist/ota/mobile-harness-update.json", "w", encoding="utf-8").write(json.dumps(manifest, indent=2) + "\n")
           print(open("dist/ota/mobile-harness-update.json", encoding="utf-8").read())
@@ -114,9 +104,9 @@ jobs:
       - name: Publish GitHub Release
         run: |
           gh release create "ota-${OTA_CODE}" \
-            --title "Personal Assistant v${OTA_NAME} (OTA ${OTA_CODE})" \
+            --title "Personal Assistant v${OTA_NAME} (OTA ${OTA_CODE}, online)" \
             --notes-file dist/ota/changelog.txt \
-            "dist/ota/personal-assistant-offline-v${OTA_CODE}.apk" \
+            "dist/ota/personal-assistant-online-v${OTA_CODE}.apk" \
             dist/ota/mobile-harness-update.json
           echo "Released: https://github.com/ranjit725qw-coder/Personal-assistant-agent/releases/tag/ota-${OTA_CODE}"
         shell: bash
