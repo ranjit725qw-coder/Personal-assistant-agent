@@ -4135,10 +4135,3 @@ private fun BrandMark(modifier: Modifier = Modifier, compact: Boolean = false) {
         )
     }
 }
-ult.Terminal,
-            contentDescription = "Mobile Harness",
-            modifier = Modifier.size(iconSize),
-            tint = primary,
-        )
-    }
-}
