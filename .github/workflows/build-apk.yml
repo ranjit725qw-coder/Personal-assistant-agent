@@ -1,13 +1,10 @@
-# Custom build for YOUR fork of Mobile-Harness (with voice features).
-# No PC needed: push any change and GitHub's server builds the APK for you.
-# Default = offline APK (~820 MB, Ubuntu+Python+Android pre-packed).
-# To build the small online APK instead: Actions tab > this workflow >
-# "Run workflow" > flavor = online.
-name: Build Custom APK
+# Manual debug builds for Personal Assistant (OTA releases are automatic).
+# NOTE: every push to main now triggers the signed "OTA Release" workflow,
+# so this one is manual-only to avoid double builds. Use it when you need a
+# quick unsigned debug APK (offline ~820 MB or online ~45 MB).
+name: Build Custom APK (manual)
 
 on:
-  push:
-    branches: [main, master]
   workflow_dispatch:
     inputs:
       flavor:
