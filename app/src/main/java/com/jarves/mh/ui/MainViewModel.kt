@@ -35,6 +35,8 @@ import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.network.ProviderApiClient
 import com.jarves.mh.runtime.ClaudeRuntimeBridge
+import com.jarves.mh.runtime.DshRuntimeBridge
+import com.jarves.mh.runtime.RuntimeBridge
 import com.jarves.mh.runtime.NativeSpawnProcess
 import com.jarves.mh.runtime.RuntimeInstallProgress
 import com.jarves.mh.runtime.RuntimeInstaller
@@ -109,6 +111,10 @@ data class AppUiState(
     val onboardingComplete: Boolean = false,
     val backgroundSetupComplete: Boolean = false,
     val selectedAgent: AgentKind = AgentKind.CLAUDE_CODE,
+    val installedAgents: Set<AgentKind> = setOf(AgentKind.CLAUDE_CODE),
+    val agentInstalling: AgentKind? = null,
+    val agentInstallMessage: String? = null,
+    val agentInstallProgress: Float = 0f,
     val provider: ProviderProfile = ProviderProfile(ProviderKind.ANTHROPIC),
     val themeMode: com.jarves.mh.ui.theme.AppThemeMode = com.jarves.mh.ui.theme.AppThemeMode.DARK,
     val apiPingStatus: ApiPingStatus = ApiPingStatus.IDLE,
@@ -173,11 +179,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val vault = ApiKeyVault(application)
     private val preferences = AppPreferences(application)
     private val exhaustedKeys = ExhaustedKeyStore(application)
-    private val runtime = ClaudeRuntimeBridge(
+    private val claudeRuntime = ClaudeRuntimeBridge(
         application,
         poolFor = { profile -> exhaustedKeys.snapshot(profile.kind.name, ApiKeyPool.parse(vault.get(profile.kind.name))) },
         onKeyExhausted = { profile, key -> exhaustedKeys.markExhausted(profile.kind.name, key) },
     )
+    private val dshRuntime = DshRuntimeBridge(application) { profile ->
+        exhaustedKeys.snapshot(profile.kind.name, ApiKeyPool.parse(vault.get(profile.kind.name))).available.firstOrNull()
+    }
+    private fun activeRuntime(): RuntimeBridge = when (_state.value.selectedAgent) {
+        AgentKind.DEEPSEEK_HARNESS -> dshRuntime
+        AgentKind.CLAUDE_CODE, AgentKind.ANTIGRAVITY -> claudeRuntime
+    }
+    private fun configureProjectRoot(projectId: String, rootPath: String) {
+        claudeRuntime.configureProjectRoot(projectId, rootPath)
+        dshRuntime.configureProjectRoot(projectId, rootPath)
+    }
     private val installer = RuntimeInstaller(application)
     private val providerApi = ProviderApiClient()
     private val fileReadRequests = LatestFileRead()
@@ -306,8 +323,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val workspace = File(getApplication<Application>().filesDir, "workspaces/terminal").apply { mkdirs() }
                     val preparedCommand = prepareInteractiveShellCommand(command)
                     val proc = installer.process(
-                        proot = runtime.proot,
-                        rootfs = runtime.rootfs,
+                        proot = activeRuntime().proot,
+                        rootfs = activeRuntime().rootfs,
                         workspace = workspace,
                         environment = emptyMap(),
                         guestCommand = listOf("/usr/bin/bash", "-c", preparedCommand),
@@ -786,13 +803,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectAgent(agent: AgentKind) {
-        if (_state.value.isRunning || _state.value.projectTerminalRunning) {
-            _state.update { it.copy(toastMessage = "Stop running tasks and terminal commands before switching agents.") }
+        if (_state.value.isRunning || _state.value.projectTerminalRunning || _state.value.agentInstalling != null) {
+            _state.update { it.copy(toastMessage = "Stop running work before switching coding agents.") }
             return
         }
-        preferences.selectedAgentKind = agent.name
-        _state.update {
-            it.copy(selectedAgent = agent, toastMessage = "${agent.title} selected in Settings.")
+        if (agent == AgentKind.ANTIGRAVITY) {
+            _state.update { it.copy(toastMessage = "Antigravity still needs its Google sign-in activeRuntime(). It is not active yet.") }
+            return
+        }
+        if (agent == AgentKind.CLAUDE_CODE || installer.isDeepSeekHarnessInstalled()) {
+            preferences.selectedAgentKind = agent.name
+            _state.update { it.copy(selectedAgent = agent, installedAgents = it.installedAgents + agent, toastMessage = "${agent.title} is active.") }
+            return
+        }
+        _state.update { it.copy(agentInstalling = agent, agentInstallMessage = "Preparing ${agent.title}…", agentInstallProgress = 0f) }
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    installer.ensureDeepSeekHarnessInstalled { progress ->
+                        _state.update { current -> current.copy(agentInstallMessage = progress.message, agentInstallProgress = progress.fraction.coerceIn(0f, 1f)) }
+                    }
+                }
+            }
+            if (result.isSuccess) {
+                preferences.selectedAgentKind = agent.name
+                _state.update { it.copy(selectedAgent = agent, installedAgents = it.installedAgents + agent, agentInstalling = null, agentInstallMessage = "DeepSeek Harness is ready", agentInstallProgress = 1f, toastMessage = "DeepSeek Harness installed and activated.") }
+            } else {
+                _state.update { it.copy(agentInstalling = null, agentInstallProgress = 0f, agentInstallMessage = result.exceptionOrNull()?.message?.take(240), toastMessage = result.exceptionOrNull()?.message ?: "DeepSeek Harness installation failed") }
+            }
         }
     }
 
@@ -800,7 +838,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch { RuntimeSetupController.snapshot.collect(::onSetupSnapshot) }
-        viewModelScope.launch { runtime.events.collect(::onRuntimeEvent) }
+        viewModelScope.launch { claudeRuntime.events.collect(::onRuntimeEvent) }
+        viewModelScope.launch { dshRuntime.events.collect(::onRuntimeEvent) }
         viewModelScope.launch { bootstrap() }
     }
 
@@ -819,7 +858,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         _state.update { current ->
-            current.copy(installedDevStacks = if (installed) installer.installedStacks() else current.installedDevStacks)
+            val agents = buildSet {
+                add(AgentKind.CLAUDE_CODE)
+                if (installed && installer.isDeepSeekHarnessInstalled()) add(AgentKind.DEEPSEEK_HARNESS)
+            }
+            val selected = if (current.selectedAgent in agents) current.selectedAgent else AgentKind.CLAUDE_CODE
+            if (selected != current.selectedAgent) preferences.selectedAgentKind = selected.name
+            current.copy(
+                selectedAgent = selected,
+                installedAgents = agents,
+                installedDevStacks = if (installed) installer.installedStacks() else current.installedDevStacks,
+            )
         }
         when {
             !installed && setupSnapshot.status == RuntimeSetupStatus.ERROR -> onSetupSnapshot(setupSnapshot)
@@ -1264,7 +1313,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openProject(project: Project) {
         closeFile()
-        runtime.configureProjectRoot(project.id, project.rootPath)
+        configureProjectRoot(project.id, project.rootPath)
         val terminal = loadProjectTerminal(project)
         val suggestedRoot = if (project.rootPath.isBlank()) detectNestedProjectRoot(project) else null
         val chats = preferences.loadProjectChats(project.id).ifEmpty {
@@ -1302,7 +1351,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         refreshProjectFiles()
         viewModelScope.launch {
-            val pending = runtime.loadPendingChanges(project.id)
+            val pending = activeRuntime().loadPendingChanges(project.id)
             if (_state.value.activeProject?.id == project.id) _state.update { it.copy(changes = pending) }
         }
     }
@@ -1312,7 +1361,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val active = _state.value.activeProject
         persistMessages()
         if (_state.value.isRunning) {
-            viewModelScope.launch { runtime.stopActiveSession() }
+            viewModelScope.launch { activeRuntime().stopActiveSession() }
         }
         if (_state.value.projectTerminalRunning) stopProjectTerminalCommand()
 
@@ -1381,7 +1430,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             language = "TypeScript",
             slug = slug,
         )
-        runtime.configureProjectRoot(project.id, project.rootPath)
+        configureProjectRoot(project.id, project.rootPath)
         val guestRoot = projectGuestRoot(project)
         _state.update {
             it.copy(
@@ -1481,7 +1530,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (current.isRunning || current.projectTerminalRunning) return
         closeFile()
         val updated = project.copy(rootPath = root)
-        runtime.configureProjectRoot(updated.id, updated.rootPath)
+        configureProjectRoot(updated.id, updated.rootPath)
         val projects = current.projects.map { if (it.id == updated.id) updated else it }
         val guestRoot = projectGuestRoot(updated)
         preferences.saveProjects(projects)
@@ -1867,24 +1916,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("</attached_files>")
         }
         viewModelScope.launch {
-            runtime.startSession(project.id, project.slug, project.kind, runtimePrompt, history, state.value.provider)
+            activeRuntime().startSession(project.id, project.slug, project.kind, runtimePrompt, history, state.value.provider)
         }
     }
 
     fun answerApproval(approved: Boolean) {
         val request = state.value.pendingApproval ?: return
-        viewModelScope.launch { runtime.respondToApproval(request, approved) }
+        viewModelScope.launch { activeRuntime().respondToApproval(request, approved) }
     }
 
     fun stopTask() {
         if (!_state.value.isRunning) return
-        viewModelScope.launch { runtime.stopActiveSession() }
+        viewModelScope.launch { activeRuntime().stopActiveSession() }
     }
 
     fun undoLastChanges() {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
-            val restored = runtime.undoLastChanges(project.id)
+            val restored = activeRuntime().undoLastChanges(project.id)
             _state.update { current ->
                 current.copy(
                     changes = if (restored) emptyList() else current.changes,
@@ -1903,7 +1952,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun keepLastChanges() {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
-            runtime.acceptLastChanges(project.id)
+            activeRuntime().acceptLastChanges(project.id)
             _state.update {
                 it.copy(
                     changes = emptyList(),
@@ -1916,7 +1965,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun undoFileChange(path: String) {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
-            if (runtime.undoFileChange(project.id, path)) {
+            if (activeRuntime().undoFileChange(project.id, path)) {
                 _state.update { current -> current.copy(changes = current.changes.filterNot { it.path == path }) }
                 refreshProjectFiles()
             }
@@ -1926,7 +1975,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun keepFileChange(path: String) {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
-            if (runtime.acceptFileChange(project.id, path)) {
+            if (activeRuntime().acceptFileChange(project.id, path)) {
                 _state.update { it.copy(changes = it.changes.filterNot { change -> change.path == path }) }
             }
         }
