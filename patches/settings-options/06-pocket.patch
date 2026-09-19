@@ -1,8 +1,0 @@
---- a/app/src/main/java/com/jarves/mh/ui/PocketDevApp.kt
-+++ b/app/src/main/java/com/jarves/mh/ui/PocketDevApp.kt
-@@ -1582,6 +1582,7 @@
-                     },
-                     onDiscoverModels = viewModel::discoverModels,
-                     onValidateProvider = viewModel::validateProvider,
-+                    onSelectAgent = viewModel::selectAgent,
-                     onSetThemeMode = viewModel::setThemeMode,
