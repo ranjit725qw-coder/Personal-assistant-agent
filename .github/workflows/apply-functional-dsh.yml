@@ -1,0 +1,39 @@
+name: Apply functional DeepSeek runtime
+
+on:
+  push:
+    branches:
+      - sync/functional-deepseek-runtime
+    paths:
+      - scripts/apply_functional_dsh.py
+      - .github/workflows/apply-functional-dsh.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: sync/functional-deepseek-runtime
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Import upstream runtime and apply integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/techjarves/Mobile-Harness/15177fcb12bbd2afc8e281a79fb8185bb5daa5b8/app/src/main/java/com/jarves/mh/runtime/DshRuntimeBridge.kt \
+            -o app/src/main/java/com/jarves/mh/runtime/DshRuntimeBridge.kt
+          python3 scripts/apply_functional_dsh.py
+          chmod +x gradlew
+          ./gradlew compileOnlineReleaseKotlin --stacktrace
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java
+          git commit -m "Add installable DeepSeek Harness runtime routing"
+          git push
