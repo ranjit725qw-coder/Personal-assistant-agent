@@ -288,19 +288,25 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     AgentKind.entries.forEachIndexed { index, agent ->
-                        val statusText = when (agent) {
-                            AgentKind.CLAUDE_CODE -> "Ready"
-                            AgentKind.DEEPSEEK_HARNESS -> "Routing foundation installed"
-                            AgentKind.ANTIGRAVITY -> "Protocol foundation installed"
+                        val installing = state.agentInstalling == agent
+                        val installed = agent in state.installedAgents
+                        val statusText = when {
+                            installing -> state.agentInstallMessage ?: "Installing…"
+                            installed && state.selectedAgent == agent -> "Active"
+                            installed -> "Installed · tap to activate"
+                            agent == AgentKind.DEEPSEEK_HARNESS -> "Tap to download and install"
+                            agent == AgentKind.ANTIGRAVITY -> "Unavailable · Google sign-in runtime pending"
+                            else -> "Ready"
                         }
                         Row(
-                            Modifier.fillMaxWidth().clickable { onSelectAgent(agent) }.padding(vertical = 11.dp),
+                            Modifier.fillMaxWidth().clickable(enabled = state.agentInstalling == null) { onSelectAgent(agent) }.padding(vertical = 11.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Text(agent.title, fontWeight = FontWeight.SemiBold)
                                 Text(agent.subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(statusText, fontSize = 10.sp, color = if (agent == AgentKind.CLAUDE_CODE) Color(0xFF58C9A3) else PocketOrange)
+                                Text(statusText, fontSize = 10.sp, color = if (installed) Color(0xFF58C9A3) else PocketOrange)
+                                if (installing) LinearProgressIndicator(progress = { state.agentInstallProgress }, modifier = Modifier.fillMaxWidth().padding(top = 5.dp))
                             }
                             SelectionDot(state.selectedAgent == agent)
                         }
@@ -439,7 +445,7 @@ fun SettingsScreen(
                 ) {
                     RuntimeInfoRow("Architecture", "ARM64 (aarch64)")
                     RuntimeInfoRow("Environment", "Ubuntu 20.04 PRoot")
-                    RuntimeInfoRow("Agent", "Claude Code + Node.js 24")
+                    RuntimeInfoRow("Agent", "${state.selectedAgent.title} + Node.js 24")
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(
                         onClick = { onClearTerminal(); terminalCleared = true },
