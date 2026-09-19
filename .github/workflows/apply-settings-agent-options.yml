@@ -1,34 +1,32 @@
-name: Apply settings agent options
+name: Clean settings migration assets
 
 on:
   push:
     branches:
       - sync/settings-agent-provider-options
     paths:
-      - scripts/apply_settings_options.py
       - .github/workflows/apply-settings-agent-options.yml
 
 permissions:
   contents: write
 
 jobs:
-  apply:
+  cleanup:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           ref: sync/settings-agent-provider-options
-      - name: Apply deterministic source edits
+      - name: Remove temporary migration files
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/apply_settings_options.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java
-          if git diff --cached --quiet; then
-            echo "Settings integration already applied."
-          else
-            git commit -m "Add coding agent and NVIDIA NIM settings options"
-            git push
-          fi
+          git rm -r --ignore-unmatch \
+            patches/settings-agent-provider-options.patch \
+            patches/settings-options \
+            scripts/apply_settings_options.py \
+            .github/workflows/apply-settings-agent-options.yml
+          git commit -m "Remove temporary settings migration assets"
+          git push
