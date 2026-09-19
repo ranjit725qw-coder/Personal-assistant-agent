@@ -98,7 +98,7 @@ class DshRuntimeBridge(
             }
             startForegroundRuntime(projectSlug)
             val installed = installer.installedRuntime()
-            check(installer.isAgentInstalled(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS)) {
+            check(installer.isDeepSeekHarnessInstalled()) {
                 "DeepSeek Harness is not installed. Open Settings → Coding agent to install it."
             }
             installer.ensureDshAndroidCompatibility()
@@ -680,37 +680,31 @@ internal object DshRouteMapper {
                 name = "mh-anthropic",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
                 defaultModel = model,
-                custom = DshCustomRoute("anthropic-messages", profile.resolvedBaseUrl),
+                custom = DshCustomRoute("anthropic-messages", profile.baseUrl.trimEnd('/')),
             )
             ProviderKind.LLM_ROUTER -> DshRoute(
                 name = "mh-openrouter",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
                 defaultModel = model,
-                custom = DshCustomRoute("anthropic-messages", profile.resolvedBaseUrl),
+                custom = DshCustomRoute("anthropic-messages", profile.baseUrl.trimEnd('/')),
             )
             ProviderKind.KIMI -> DshRoute(
                 name = "mh-kimi",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
                 defaultModel = model,
-                custom = DshCustomRoute(profile.dshApi.ifBlank { "anthropic-messages" }, profile.resolvedBaseUrl),
-            )
-            ProviderKind.OPENCODE_ZEN -> DshRoute(
-                name = "opencode-zen",
-                keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
-                defaultModel = model,
-                custom = DshCustomRoute("openai-responses", profile.resolvedBaseUrl),
+                custom = DshCustomRoute("anthropic-messages", profile.baseUrl.trimEnd('/')),
             )
             ProviderKind.NVIDIA_NIM -> DshRoute(
                 name = "nvidia-nim",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
                 defaultModel = model,
-                custom = DshCustomRoute("openai-completions", profile.resolvedBaseUrl),
+                custom = DshCustomRoute("openai-completions", profile.baseUrl.trimEnd('/')),
             )
             ProviderKind.CUSTOM -> DshRoute(
                 name = "mh-custom",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
                 defaultModel = model,
-                custom = DshCustomRoute(profile.dshApi.ifBlank { "anthropic-messages" }, profile.resolvedBaseUrl),
+                custom = DshCustomRoute("anthropic-messages", profile.baseUrl.trimEnd('/')),
             )
             ProviderKind.CLAUDE -> throw IllegalArgumentException("Claude subscription login is not supported by DeepSeek Harness")
         }

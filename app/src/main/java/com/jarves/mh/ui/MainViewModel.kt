@@ -323,8 +323,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val workspace = File(getApplication<Application>().filesDir, "workspaces/terminal").apply { mkdirs() }
                     val preparedCommand = prepareInteractiveShellCommand(command)
                     val proc = installer.process(
-                        proot = activeRuntime().proot,
-                        rootfs = activeRuntime().rootfs,
+                        proot = runtime.proot,
+                        rootfs = runtime.rootfs,
                         workspace = workspace,
                         environment = emptyMap(),
                         guestCommand = listOf("/usr/bin/bash", "-c", preparedCommand),
