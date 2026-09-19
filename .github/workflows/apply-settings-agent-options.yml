@@ -5,7 +5,7 @@ on:
     branches:
       - sync/settings-agent-provider-options
     paths:
-      - patches/settings-options/**
+      - scripts/apply_settings_options.py
       - .github/workflows/apply-settings-agent-options.yml
 
 permissions:
@@ -18,22 +18,17 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: sync/settings-agent-provider-options
-      - name: Apply isolated integration patches
+      - name: Apply deterministic source edits
         shell: bash
         run: |
-          set -u
-          applied=0
-          failed=0
-          for patch in patches/settings-options/*.patch; do
-            if git apply --check "$patch"; then
-              git apply "$patch"
-              git add app/src/main/java
-              git commit -m "Apply $(basename "$patch" .patch) settings integration"
-              applied=1
-            else
-              echo "::error::Could not apply $patch"
-              failed=1
-            fi
-          done
-          if [ "$applied" -eq 1 ]; then git push; fi
-          exit "$failed"
+          set -euo pipefail
+          python3 scripts/apply_settings_options.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java
+          if git diff --cached --quiet; then
+            echo "Settings integration already applied."
+          else
+            git commit -m "Add coding agent and NVIDIA NIM settings options"
+            git push
+          fi
