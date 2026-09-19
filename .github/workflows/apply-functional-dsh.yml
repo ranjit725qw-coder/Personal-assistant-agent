@@ -6,6 +6,7 @@ on:
       - sync/functional-deepseek-runtime
     paths:
       - scripts/apply_functional_dsh.py
+      - scripts/fix_functional_dsh_script.py
       - .github/workflows/apply-functional-dsh.yml
 
 permissions:
@@ -31,6 +32,7 @@ jobs:
             -o app/src/main/java/com/jarves/mh/runtime/DshRuntimeBridge.kt 2>&1 | tee /tmp/integration.txt
           status=${PIPESTATUS[0]}
           if [ "$status" -eq 0 ]; then
+            python3 scripts/fix_functional_dsh_script.py
             python3 scripts/apply_functional_dsh.py 2>&1 | tee -a /tmp/integration.txt
             status=${PIPESTATUS[0]}
           fi
