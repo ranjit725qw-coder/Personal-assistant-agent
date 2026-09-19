@@ -61,6 +61,8 @@ class RuntimeInstaller(private val context: Context) {
     private val coreToolsMarker = File(rootfs, ".pocket-core-tools-version")
     private val systemUpgradeMarker = File(rootfs, ".pocket-system-upgrade-version")
     private val devStacksFile = File(rootfs, ".pocket-dev-stacks.json")
+    private val dshMarker = File(rootfs, ".pocket-dsh-version")
+    private val dshAndroidCompatibilityMarker = File(rootfs, ".pocket-dsh-android-compat-version")
     private val macosMetadataRepairMarker = File(rootfs, ".pocket-macos-metadata-repair")
 
     fun isInstalled(): Boolean {
@@ -242,6 +244,69 @@ class RuntimeInstaller(private val context: Context) {
         // open on some Android kernels, so the real user session is the launch check.
         onProgress(RuntimeInstallProgress("Setup complete", 1f))
         return InstalledRuntime(proot, rootfs, claude, version)
+    }
+
+    fun isDeepSeekHarnessInstalled(): Boolean = isInstalled() &&
+        File(rootfs, "usr/local/lib/dsh/node_modules/.bin/dsh").isFile &&
+        dshMarker.readTextOrNull() == DSH_VERSION
+
+    suspend fun ensureDeepSeekHarnessInstalled(onProgress: suspend (RuntimeInstallProgress) -> Unit) {
+        if (isDeepSeekHarnessInstalled()) {
+            ensureDshAndroidCompatibility()
+            onProgress(RuntimeInstallProgress("DeepSeek Harness is ready", 1f))
+            return
+        }
+        val runtime = installedRuntime()
+        onProgress(RuntimeInstallProgress("Installing DeepSeek Harness $DSH_VERSION", 0.05f, indeterminate = true))
+        runGuestCommand(
+            proot = runtime.proot,
+            command = "set -e; rm -rf /usr/local/lib/dsh.installing; mkdir -p /usr/local/lib/dsh.installing; " +
+                "cd /usr/local/lib/dsh.installing; npm init -y >/dev/null; " +
+                "npm install --omit=dev --no-audit --no-fund @deepseek-ai/dsh@$DSH_VERSION; " +
+                "rm -rf /usr/local/lib/dsh; mv /usr/local/lib/dsh.installing /usr/local/lib/dsh; " +
+                "ln -sfn ../lib/dsh/node_modules/.bin/dsh /usr/local/bin/dsh",
+            displayCommand = "npm install @deepseek-ai/dsh@$DSH_VERSION",
+            fraction = 0.45f,
+            timeoutMs = 20 * 60 * 1_000L,
+            onProgress = onProgress,
+            failureMessage = "DeepSeek Harness installation failed",
+        )
+        dshMarker.writeText(DSH_VERSION)
+        dshAndroidCompatibilityMarker.delete()
+        ensureDshAndroidCompatibility()
+        verifyGuest(runtime.proot, "/usr/local/bin/dsh --profile headless --help", "DeepSeek Harness verification failed")
+        check(isDeepSeekHarnessInstalled()) { "DeepSeek Harness installation is incomplete" }
+        onProgress(RuntimeInstallProgress("DeepSeek Harness is ready", 1f, event = RuntimeInstallEvent.COMPLETED))
+    }
+
+    fun ensureDshAndroidCompatibility() {
+        if (!isDeepSeekHarnessInstalled()) return
+        val persistence = File(rootfs, "usr/local/lib/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js")
+        val localFs = File(rootfs, "usr/local/lib/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js")
+        patchDshHardLinkPublication(
+            persistence,
+            "import { link, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, truncate } from \"node:fs/promises\";",
+            "import { copyFile, link, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, truncate } from \"node:fs/promises\";",
+            "await link(tmp, finalPath);",
+            "await copyFile(tmp, finalPath, 1);",
+        )
+        patchDshHardLinkPublication(
+            localFs,
+            "import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from \"node:fs/promises\";",
+            "import { chmod, copyFile, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from \"node:fs/promises\";",
+            "await linkFile(tempPath, absolutePath);",
+            "await copyFile(tempPath, absolutePath, 1);",
+        )
+        dshAndroidCompatibilityMarker.writeText(DSH_ANDROID_COMPATIBILITY_VERSION)
+    }
+
+    private fun patchDshHardLinkPublication(file: File, importBefore: String, importAfter: String, callBefore: String, callAfter: String) {
+        check(file.isFile) { "DeepSeek Harness compatibility file is missing: ${file.name}" }
+        var source = file.readText()
+        if (callAfter in source && importAfter in source) return
+        check(callBefore in source && importBefore in source) { "DeepSeek Harness $DSH_VERSION is not compatible with this build" }
+        source = source.replace(importBefore, importAfter).replace(callBefore, callAfter)
+        file.writeText(source)
     }
 
     /**
@@ -908,6 +973,7 @@ class RuntimeInstaller(private val context: Context) {
         environment: Map<String, String>,
         guestCommand: List<String>,
         guestWorkspacePath: String = "/workspace",
+        emulateHardLinks: Boolean = true,
     ): Process {
         require(
             guestWorkspacePath == "/workspace" ||
@@ -922,7 +988,7 @@ class RuntimeInstaller(private val context: Context) {
         val bridge = File(context.filesDir, "runtime-bridge").apply { mkdirs() }
         val args = buildList {
             add(proot.absolutePath)
-            add("--link2symlink")
+            if (emulateHardLinks) add("--link2symlink")
             add("-0")
             add("-r")
             add(rootfs.absolutePath)
