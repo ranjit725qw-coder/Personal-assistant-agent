@@ -1,0 +1,40 @@
+name: Fix Antigravity status text
+on:
+  push:
+    branches: [fix/antigravity-status-message-v2]
+    paths: [.github/workflows/fix-antigravity-text.yml]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/antigravity-status-message-v2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Correct text and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/src/main/java/com/jarves/mh/ui/MainViewModel.kt')
+          text = p.read_text()
+          old = 'Antigravity still needs its Google sign-in activeRuntime(). It is not active yet.'
+          new = 'Antigravity requires Google sign-in and is not available yet.'
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one broken message, found {text.count(old)}')
+          p.write_text(text.replace(old, new, 1))
+          PY
+          chmod +x gradlew
+          ./gradlew compileOnlineReleaseKotlin --stacktrace
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/com/jarves/mh/ui/MainViewModel.kt
+          git commit -m 'Correct Antigravity availability message'
+          git push
