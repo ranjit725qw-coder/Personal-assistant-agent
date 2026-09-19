@@ -1,38 +1,31 @@
-name: Validate settings build fix
+name: Clean settings build diagnostics
 
 on:
   push:
     branches:
       - fix/settings-build-release
     paths:
-      - scripts/fix_nvidia_provider_ui.py
       - .github/workflows/diagnose-settings-build.yml
 
 permissions:
   contents: write
 
 jobs:
-  validate:
+  cleanup:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           ref: fix/settings-build-release
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-      - name: Apply provider UI fix and compile release
+      - name: Remove temporary diagnostics
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/fix_nvidia_provider_ui.py
-          chmod +x gradlew
-          ./gradlew compileOnlineReleaseKotlin --stacktrace
-          printf 'Build succeeded\n' > build-diagnostics.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/jarves/mh/ui/PocketDevApp.kt build-diagnostics.txt
-          git commit -m "Handle NVIDIA NIM in provider setup UI"
+          git rm --ignore-unmatch \
+            build-diagnostics.txt \
+            scripts/fix_nvidia_provider_ui.py \
+            .github/workflows/diagnose-settings-build.yml
+          git commit -m "Remove temporary build diagnostics"
           git push
