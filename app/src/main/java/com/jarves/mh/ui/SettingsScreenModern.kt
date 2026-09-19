@@ -86,6 +86,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jarves.mh.BuildConfig
 import com.jarves.mh.data.ApiKeyPool
+import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.DevStack
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
@@ -96,7 +97,7 @@ import com.jarves.mh.ui.theme.AppThemeMode
 import com.jarves.mh.ui.theme.PocketOrange
 import kotlinx.coroutines.launch
 
-private enum class SettingsSection { CONNECTION, APPEARANCE, TOOLS, RUNTIME, APP_UPDATE, UPDATE_CHANNEL }
+private enum class SettingsSection { AGENT, CONNECTION, APPEARANCE, TOOLS, RUNTIME, APP_UPDATE, UPDATE_CHANNEL }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -105,6 +106,7 @@ fun SettingsScreen(
     onSaveProvider: (ProviderProfile, String) -> Unit,
     onDiscoverModels: suspend (ProviderProfile, String) -> ModelDiscoveryResult,
     onValidateProvider: suspend (ProviderProfile, String, List<DiscoveredModel>) -> ConnectionValidation,
+    onSelectAgent: (AgentKind) -> Unit,
     onSetThemeMode: (AppThemeMode) -> Unit,
     onPing: () -> Unit,
     onClearTerminal: () -> Unit,
@@ -271,6 +273,41 @@ fun SettingsScreen(
             contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+
+            item {
+                SettingsAccordion(
+                    title = "Coding agent",
+                    subtitle = state.selectedAgent.title,
+                    icon = Icons.Default.SmartToy,
+                    expanded = expanded == SettingsSection.AGENT,
+                    onClick = { toggle(SettingsSection.AGENT) },
+                ) {
+                    Text(
+                        "Choose the coding agent. Installation and account status are shown for each option.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    AgentKind.entries.forEachIndexed { index, agent ->
+                        val statusText = when (agent) {
+                            AgentKind.CLAUDE_CODE -> "Ready"
+                            AgentKind.DEEPSEEK_HARNESS -> "Routing foundation installed"
+                            AgentKind.ANTIGRAVITY -> "Protocol foundation installed"
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().clickable { onSelectAgent(agent) }.padding(vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(agent.title, fontWeight = FontWeight.SemiBold)
+                                Text(agent.subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(statusText, fontSize = 10.sp, color = if (agent == AgentKind.CLAUDE_CODE) Color(0xFF58C9A3) else PocketOrange)
+                            }
+                            SelectionDot(state.selectedAgent == agent)
+                        }
+                        if (index != AgentKind.entries.lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    }
+                }
+            }
 
             item {
                 SettingsAccordion(

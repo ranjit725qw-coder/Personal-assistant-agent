@@ -8,6 +8,12 @@ import kotlin.random.Random
 
 enum class ProviderProtocol { CLAUDE_LOGIN, ANTHROPIC, ANTHROPIC_GATEWAY, OPENROUTER, OPENAI_RESPONSES, OPENAI_CHAT }
 
+enum class AgentKind(val title: String, val subtitle: String) {
+    CLAUDE_CODE("Claude Code", "Anthropic coding agent"),
+    DEEPSEEK_HARNESS("DeepSeek Harness", "Open-source coding harness"),
+    ANTIGRAVITY("Antigravity", "Google account coding agent"),
+}
+
 enum class ProviderKind(
     val title: String,
     val subtitle: String,
@@ -21,6 +27,7 @@ enum class ProviderKind(
     LLM_ROUTER("OpenRouter", "Use your OpenRouter API key", ProviderProtocol.OPENROUTER, "https://openrouter.ai/api", "~anthropic/claude-sonnet-latest"),
     DEEPSEEK("DeepSeek", "Use your DeepSeek API key", ProviderProtocol.ANTHROPIC_GATEWAY, "https://api.deepseek.com/anthropic", "deepseek-v4-flash"),
     KIMI("Kimi", "Anthropic-compatible endpoint", ProviderProtocol.ANTHROPIC_GATEWAY, "https://api.moonshot.ai/anthropic", "kimi-k2.6", true),
+    NVIDIA_NIM("NVIDIA NIM", "OpenAI-compatible NVIDIA inference", ProviderProtocol.OPENAI_CHAT, "https://integrate.api.nvidia.com/v1", "qwen/qwen2.5-coder-32b-instruct"),
     CUSTOM("Custom API", "Anthropic-compatible endpoint", ProviderProtocol.ANTHROPIC_GATEWAY, "", "", true),
 }
 

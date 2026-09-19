@@ -1,6 +1,7 @@
 package com.jarves.mh.data
 
 import android.content.Context
+import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.ChatAttachment
 import com.jarves.mh.model.Project
@@ -32,6 +33,10 @@ class AppPreferences(private val context: Context) {
     var themeMode: String
         get() = preferences.getString("theme_mode", "dark") ?: "dark"
         set(value) { preferences.edit().putString("theme_mode", value).apply() }
+
+    var selectedAgentKind: String
+        get() = preferences.getString("selected_agent_kind", AgentKind.CLAUDE_CODE.name) ?: AgentKind.CLAUDE_CODE.name
+        set(value) { preferences.edit().putString("selected_agent_kind", value).apply() }
 
     var legacySeededCredentialRemoved: Boolean
         get() = preferences.getBoolean("legacy_seeded_credential_removed", false)
