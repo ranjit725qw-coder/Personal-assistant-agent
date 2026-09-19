@@ -1582,6 +1582,7 @@ private fun RootScreenHost(
                     },
                     onDiscoverModels = viewModel::discoverModels,
                     onValidateProvider = viewModel::validateProvider,
+                    onSelectAgent = viewModel::selectAgent,
                     onSetThemeMode = viewModel::setThemeMode,
                     onPing = viewModel::pingApi,
                     onClearTerminal = viewModel::clearTerminal,

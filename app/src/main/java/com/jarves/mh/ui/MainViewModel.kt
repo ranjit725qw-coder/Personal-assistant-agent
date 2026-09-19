@@ -15,6 +15,7 @@ import com.jarves.mh.data.ApiKeyPool
 import com.jarves.mh.data.ApiKeyVault
 import com.jarves.mh.data.ExhaustedKeyStore
 import com.jarves.mh.data.AppPreferences
+import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.ActivityItem
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.ChatMessage
@@ -107,6 +108,7 @@ data class AppUiState(
     val startupErrorIsOffline: Boolean = false,
     val onboardingComplete: Boolean = false,
     val backgroundSetupComplete: Boolean = false,
+    val selectedAgent: AgentKind = AgentKind.CLAUDE_CODE,
     val provider: ProviderProfile = ProviderProfile(ProviderKind.ANTHROPIC),
     val themeMode: com.jarves.mh.ui.theme.AppThemeMode = com.jarves.mh.ui.theme.AppThemeMode.DARK,
     val apiPingStatus: ApiPingStatus = ApiPingStatus.IDLE,
@@ -192,6 +194,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         AppUiState(
             onboardingComplete = preferences.onboardingComplete,
             backgroundSetupComplete = preferences.backgroundSetupComplete,
+            selectedAgent = runCatching { AgentKind.valueOf(preferences.selectedAgentKind) }
+                .getOrDefault(AgentKind.CLAUDE_CODE),
             provider = preferences.loadProvider(vault),
             themeMode = runCatching { com.jarves.mh.ui.theme.AppThemeMode.valueOf(preferences.themeMode.uppercase()) }
                 .getOrDefault(com.jarves.mh.ui.theme.AppThemeMode.DARK),
@@ -779,6 +783,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setThemeMode(mode: com.jarves.mh.ui.theme.AppThemeMode) {
         preferences.themeMode = mode.name.lowercase()
         _state.update { it.copy(themeMode = mode) }
+    }
+
+    fun selectAgent(agent: AgentKind) {
+        if (_state.value.isRunning || _state.value.projectTerminalRunning) {
+            _state.update { it.copy(toastMessage = "Stop running tasks and terminal commands before switching agents.") }
+            return
+        }
+        preferences.selectedAgentKind = agent.name
+        _state.update {
+            it.copy(selectedAgent = agent, toastMessage = "${agent.title} selected in Settings.")
+        }
     }
 
     fun getSavedApiKey(kind: ProviderKind): String = vault.get(kind.name).orEmpty()

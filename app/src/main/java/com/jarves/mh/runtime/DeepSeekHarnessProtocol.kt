@@ -45,6 +45,12 @@ internal object DeepSeekHarnessRouteMapper {
             ProviderKind.ANTHROPIC -> customRoute("mh-anthropic", model, baseUrl)
             ProviderKind.LLM_ROUTER -> customRoute("mh-openrouter", model, baseUrl)
             ProviderKind.KIMI -> customRoute("mh-kimi", model, baseUrl)
+            ProviderKind.NVIDIA_NIM -> DeepSeekHarnessRoute(
+                name = "nvidia-nim",
+                keyEnvironmentVariable = FALLBACK_KEY_ENV,
+                model = model,
+                custom = DeepSeekHarnessCustomRoute(DshApiProtocol.OPENAI_COMPLETIONS, baseUrl),
+            )
             ProviderKind.CUSTOM -> customRoute("mh-custom", model, baseUrl)
             ProviderKind.CLAUDE -> throw IllegalArgumentException(
                 "Claude subscription login is not supported by DeepSeek Harness",
