@@ -1,61 +1,37 @@
-name: Apply functional DeepSeek runtime
+name: Clean DeepSeek integration helpers
 
 on:
   push:
     branches:
       - sync/functional-deepseek-runtime
     paths:
-      - scripts/apply_functional_dsh.py
-      - scripts/fix_functional_dsh_script.py
-      - scripts/adapt_functional_dsh.py
       - .github/workflows/apply-functional-dsh.yml
 
 permissions:
   contents: write
 
 jobs:
-  integrate-and-validate:
+  cleanup:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           ref: sync/functional-deepseek-runtime
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-      - name: Import, integrate, validate, and persist result
+      - name: Remove temporary integration files
         shell: bash
         run: |
-          set +e
-          upstream=https://raw.githubusercontent.com/techjarves/Mobile-Harness/15177fcb12bbd2afc8e281a79fb8185bb5daa5b8/app/src/main/java/com/jarves/mh/runtime
-          curl -fsSL "$upstream/DshRuntimeBridge.kt" -o app/src/main/java/com/jarves/mh/runtime/DshRuntimeBridge.kt 2>&1 | tee /tmp/integration.txt
-          status=${PIPESTATUS[0]}
-          if [ "$status" -eq 0 ]; then
-            curl -fsSL "$upstream/WorkspaceCheckpoints.kt" -o app/src/main/java/com/jarves/mh/runtime/WorkspaceCheckpoints.kt 2>&1 | tee -a /tmp/integration.txt
-            status=${PIPESTATUS[0]}
-          fi
-          if [ "$status" -eq 0 ]; then
-            python3 scripts/fix_functional_dsh_script.py
-            python3 scripts/apply_functional_dsh.py 2>&1 | tee -a /tmp/integration.txt
-            status=${PIPESTATUS[0]}
-          fi
-          if [ "$status" -eq 0 ]; then
-            python3 scripts/adapt_functional_dsh.py 2>&1 | tee -a /tmp/integration.txt
-            status=${PIPESTATUS[0]}
-          fi
-          if [ "$status" -eq 0 ]; then
-            chmod +x gradlew
-            ./gradlew compileOnlineReleaseKotlin --stacktrace 2>&1 | tee -a /tmp/integration.txt
-            status=${PIPESTATUS[0]}
-          fi
-          mkdir -p diagnostics
-          tail -n 1000 /tmp/integration.txt > diagnostics/functional-dsh-validation.txt
-          printf '%s\n' "$status" > diagnostics/functional-dsh-status.txt
+          set -euo pipefail
+          rm -f \
+            scripts/apply_functional_dsh.py \
+            scripts/fix_functional_dsh_script.py \
+            scripts/adapt_functional_dsh.py \
+            diagnostics/functional-dsh-status.txt \
+            diagnostics/functional-dsh-validation.txt \
+            .github/workflows/apply-functional-dsh.yml
+          rmdir diagnostics 2>/dev/null || true
+          rmdir scripts 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f app/src/main/java diagnostics/functional-dsh-validation.txt diagnostics/functional-dsh-status.txt
-          git commit -m "Adapt functional DeepSeek runtime and record validation" || true
+          git add -A
+          git commit -m "Remove temporary DeepSeek integration helpers"
           git push
-          exit "$status"
