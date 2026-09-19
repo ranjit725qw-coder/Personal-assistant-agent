@@ -1,17 +1,18 @@
-name: Diagnose settings build
+name: Validate settings build fix
 
 on:
   push:
     branches:
       - fix/settings-build-release
     paths:
+      - scripts/fix_nvidia_provider_ui.py
       - .github/workflows/diagnose-settings-build.yml
 
 permissions:
   contents: write
 
 jobs:
-  diagnose:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -22,26 +23,16 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - name: Capture Kotlin compiler diagnostics
+      - name: Apply provider UI fix and compile release
         shell: bash
         run: |
-          set +e
+          set -euo pipefail
+          python3 scripts/fix_nvidia_provider_ui.py
           chmod +x gradlew
-          ./gradlew compileOnlineReleaseKotlin --stacktrace > full-build.log 2>&1
-          status=$?
-          if [ "$status" -ne 0 ]; then
-            grep -E '(^e: | error: |FAILURE:|What went wrong:|Compilation error|Unresolved reference|must be exhaustive)' full-build.log > build-diagnostics.txt || true
-            tail -n 250 full-build.log >> build-diagnostics.txt
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add build-diagnostics.txt
-            git commit -m "Capture settings build failure diagnostics"
-            git push
-            exit "$status"
-          fi
-          echo "Build succeeded" > build-diagnostics.txt
+          ./gradlew compileOnlineReleaseKotlin --stacktrace
+          printf 'Build succeeded\n' > build-diagnostics.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add build-diagnostics.txt
-          git commit -m "Record successful settings build"
+          git add app/src/main/java/com/jarves/mh/ui/PocketDevApp.kt build-diagnostics.txt
+          git commit -m "Handle NVIDIA NIM in provider setup UI"
           git push
