@@ -23,17 +23,28 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - name: Import upstream runtime and apply integration
+      - name: Import, integrate, validate, and persist result
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           curl -fsSL https://raw.githubusercontent.com/techjarves/Mobile-Harness/15177fcb12bbd2afc8e281a79fb8185bb5daa5b8/app/src/main/java/com/jarves/mh/runtime/DshRuntimeBridge.kt \
-            -o app/src/main/java/com/jarves/mh/runtime/DshRuntimeBridge.kt
-          python3 scripts/apply_functional_dsh.py
-          chmod +x gradlew
-          ./gradlew compileOnlineReleaseKotlin --stacktrace
+            -o app/src/main/java/com/jarves/mh/runtime/DshRuntimeBridge.kt 2>&1 | tee /tmp/integration.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -eq 0 ]; then
+            python3 scripts/apply_functional_dsh.py 2>&1 | tee -a /tmp/integration.log
+            status=${PIPESTATUS[0]}
+          fi
+          if [ "$status" -eq 0 ]; then
+            chmod +x gradlew
+            ./gradlew compileOnlineReleaseKotlin --stacktrace 2>&1 | tee -a /tmp/integration.log
+            status=${PIPESTATUS[0]}
+          fi
+          mkdir -p diagnostics
+          tail -n 1000 /tmp/integration.log > diagnostics/functional-dsh-validation.log
+          printf '%s\n' "$status" > diagnostics/functional-dsh-status.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java
-          git commit -m "Add installable DeepSeek Harness runtime routing"
+          git add app/src/main/java diagnostics
+          git commit -m "Apply functional DeepSeek runtime and record validation"
           git push
+          exit "$status"
