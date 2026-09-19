@@ -4,6 +4,7 @@ import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class RuntimeLaunchConfigBuilderTest {
@@ -54,5 +55,27 @@ class RuntimeLaunchConfigBuilderTest {
         assertEquals("temporary-openrouter-secret", config.environment["ANTHROPIC_AUTH_TOKEN"])
         assertEquals("temporary-openrouter-secret", config.environment["OPENROUTER_API_KEY"])
         assertEquals("", config.environment["ANTHROPIC_API_KEY"])
+    }
+
+    @Test
+    fun claudeSubscriptionTokenIsIsolatedFromApiKeyCredentials() {
+        val config = RuntimeLaunchConfigBuilder.build(
+            ProviderProfile(ProviderKind.CLAUDE),
+            authToken = "subscription-token",
+        )
+
+        assertEquals("subscription-token", config.environment["CLAUDE_CODE_OAUTH_TOKEN"])
+        assertEquals("", config.environment["ANTHROPIC_API_KEY"])
+        assertEquals("", config.environment["ANTHROPIC_AUTH_TOKEN"])
+        assertNull(config.environment["ANTHROPIC_BASE_URL"])
+    }
+
+    @Test
+    fun claudeWithoutSavedTokenKeepsExistingLoginFlow() {
+        val config = RuntimeLaunchConfigBuilder.build(ProviderProfile(ProviderKind.CLAUDE))
+
+        assertNull(config.environment["CLAUDE_CODE_OAUTH_TOKEN"])
+        assertNull(config.environment["ANTHROPIC_API_KEY"])
+        assertNull(config.environment["ANTHROPIC_AUTH_TOKEN"])
     }
 }
