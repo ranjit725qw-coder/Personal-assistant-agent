@@ -1,0 +1,47 @@
+name: Diagnose settings build
+
+on:
+  push:
+    branches:
+      - fix/settings-build-release
+    paths:
+      - .github/workflows/diagnose-settings-build.yml
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/settings-build-release
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Capture Kotlin compiler diagnostics
+        shell: bash
+        run: |
+          set +e
+          chmod +x gradlew
+          ./gradlew compileOnlineReleaseKotlin --stacktrace > full-build.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            grep -E '(^e: | error: |FAILURE:|What went wrong:|Compilation error|Unresolved reference|must be exhaustive)' full-build.log > build-diagnostics.txt || true
+            tail -n 250 full-build.log >> build-diagnostics.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add build-diagnostics.txt
+            git commit -m "Capture settings build failure diagnostics"
+            git push
+            exit "$status"
+          fi
+          echo "Build succeeded" > build-diagnostics.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add build-diagnostics.txt
+          git commit -m "Record successful settings build"
+          git push
