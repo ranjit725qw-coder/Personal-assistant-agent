@@ -1,0 +1,152 @@
+--- a/app/src/main/java/com/jarves/mh/model/Models.kt
++++ b/app/src/main/java/com/jarves/mh/model/Models.kt
+@@ -7,6 +7,13 @@
+ 
+ enum class ProviderProtocol { CLAUDE_LOGIN, ANTHROPIC, ANTHROPIC_GATEWAY, OPENROUTER, OPENAI_RESPONSES, OPENAI_CHAT }
+ 
++enum class AgentKind(val title: String, val subtitle: String) {
++    CLAUDE_CODE("Claude Code", "Anthropic coding agent"),
++    DEEPSEEK_HARNESS("DeepSeek Harness", "Open-source coding harness"),
++    ANTIGRAVITY("Antigravity", "Google account coding agent"),
++}
++
+ enum class ProviderKind(
+@@ -23,6 +30,7 @@
+     LLM_ROUTER("OpenRouter", "Use your OpenRouter API key", ProviderProtocol.OPENROUTER, "https://openrouter.ai/api", "~anthropic/claude-sonnet-latest"),
+     DEEPSEEK("DeepSeek", "Use your DeepSeek API key", ProviderProtocol.ANTHROPIC_GATEWAY, "https://api.deepseek.com/anthropic", "deepseek-v4-flash"),
+     KIMI("Kimi", "Anthropic-compatible endpoint", ProviderProtocol.ANTHROPIC_GATEWAY, "https://api.moonshot.ai/anthropic", "kimi-k2.6", true),
++    NVIDIA_NIM("NVIDIA NIM", "OpenAI-compatible NVIDIA inference", ProviderProtocol.OPENAI_CHAT, "https://integrate.api.nvidia.com/v1", "qwen/qwen2.5-coder-32b-instruct"),
+     CUSTOM("Custom API", "Anthropic-compatible endpoint", ProviderProtocol.ANTHROPIC_GATEWAY, "", "", true),
+ }
+--- a/app/src/main/java/com/jarves/mh/runtime/DeepSeekHarnessProtocol.kt
++++ b/app/src/main/java/com/jarves/mh/runtime/DeepSeekHarnessProtocol.kt
+@@ -49,6 +49,12 @@
+             ProviderKind.LLM_ROUTER -> customRoute("mh-openrouter", model, baseUrl)
+             ProviderKind.KIMI -> customRoute("mh-kimi", model, baseUrl)
++            ProviderKind.NVIDIA_NIM -> DeepSeekHarnessRoute(
++                name = "nvidia-nim",
++                keyEnvironmentVariable = FALLBACK_KEY_ENV,
++                model = model,
++                custom = DeepSeekHarnessCustomRoute(DshApiProtocol.OPENAI_COMPLETIONS, baseUrl),
++            )
+             ProviderKind.CUSTOM -> customRoute("mh-custom", model, baseUrl)
+             ProviderKind.CLAUDE -> throw IllegalArgumentException(
+                 "Claude subscription login is not supported by DeepSeek Harness",
+--- a/app/src/main/java/com/jarves/mh/data/AppPreferences.kt
++++ b/app/src/main/java/com/jarves/mh/data/AppPreferences.kt
+@@ -3,6 +3,7 @@
+ import android.content.Context
++import com.jarves.mh.model.AgentKind
+ import com.jarves.mh.model.ChatMessage
+@@ -29,6 +30,10 @@
+         get() = preferences.getString("theme_mode", "dark") ?: "dark"
+         set(value) { preferences.edit().putString("theme_mode", value).apply() }
+ 
++    var selectedAgentKind: String
++        get() = preferences.getString("selected_agent_kind", AgentKind.CLAUDE_CODE.name) ?: AgentKind.CLAUDE_CODE.name
++        set(value) { preferences.edit().putString("selected_agent_kind", value).apply() }
++
+     var legacySeededCredentialRemoved: Boolean
+--- a/app/src/main/java/com/jarves/mh/ui/MainViewModel.kt
++++ b/app/src/main/java/com/jarves/mh/ui/MainViewModel.kt
+@@ -14,6 +14,7 @@
+ import com.jarves.mh.data.AppPreferences
++import com.jarves.mh.model.AgentKind
+ import com.jarves.mh.model.ActivityItem
+@@ -84,6 +85,7 @@
+     val backgroundSetupComplete: Boolean = false,
++    val selectedAgent: AgentKind = AgentKind.CLAUDE_CODE,
+     val provider: ProviderProfile = ProviderProfile(ProviderKind.ANTHROPIC),
+@@ -156,6 +158,9 @@
+             onboardingComplete = preferences.onboardingComplete,
+             backgroundSetupComplete = preferences.backgroundSetupComplete,
++            selectedAgent = runCatching { AgentKind.valueOf(preferences.selectedAgentKind) }
++                .getOrDefault(AgentKind.CLAUDE_CODE),
+             provider = preferences.loadProvider(vault),
+@@ -720,6 +725,18 @@
+     fun setThemeMode(mode: com.jarves.mh.ui.theme.AppThemeMode) {
+         preferences.themeMode = mode.name.lowercase()
+         _state.update { it.copy(themeMode = mode) }
+     }
++
++    fun selectAgent(agent: AgentKind) {
++        if (_state.value.isRunning || _state.value.projectTerminalRunning) {
++            _state.update { it.copy(toastMessage = "Stop running tasks and terminal commands before switching agents.") }
++            return
++        }
++        preferences.selectedAgentKind = agent.name
++        _state.update {
++            it.copy(selectedAgent = agent, toastMessage = "${agent.title} selected in Settings.")
++        }
++    }
+ 
+     fun getSavedApiKey(kind: ProviderKind): String = vault.get(kind.name).orEmpty()
+--- a/app/src/main/java/com/jarves/mh/ui/SettingsScreenModern.kt
++++ b/app/src/main/java/com/jarves/mh/ui/SettingsScreenModern.kt
+@@ -76,6 +76,7 @@
+ import com.jarves.mh.BuildConfig
+ import com.jarves.mh.data.ApiKeyPool
++import com.jarves.mh.model.AgentKind
+ import com.jarves.mh.model.DevStack
+@@ -88,7 +89,7 @@
+ import kotlinx.coroutines.launch
+ 
+-private enum class SettingsSection { CONNECTION, APPEARANCE, TOOLS, RUNTIME, APP_UPDATE, UPDATE_CHANNEL }
++private enum class SettingsSection { AGENT, CONNECTION, APPEARANCE, TOOLS, RUNTIME, APP_UPDATE, UPDATE_CHANNEL }
+@@ -99,6 +100,7 @@
+     onValidateProvider: suspend (ProviderProfile, String, List<DiscoveredModel>) -> ConnectionValidation,
++    onSelectAgent: (AgentKind) -> Unit,
+     onSetThemeMode: (AppThemeMode) -> Unit,
+@@ -229,6 +231,46 @@
+         ) {
++
++            item {
++                SettingsAccordion(
++                    title = "Coding agent",
++                    subtitle = state.selectedAgent.title,
++                    icon = Icons.Default.SmartToy,
++                    expanded = expanded == SettingsSection.AGENT,
++                    onClick = { toggle(SettingsSection.AGENT) },
++                ) {
++                    Text(
++                        "Choose the coding agent shown by Mobile Harness. Agent bundles and account setup are managed separately.",
++                        fontSize = 12.sp,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    )
++                    AgentKind.entries.forEachIndexed { index, agent ->
++                        val statusText = when (agent) {
++                            AgentKind.CLAUDE_CODE -> "Ready"
++                            AgentKind.DEEPSEEK_HARNESS -> "Routing foundation installed"
++                            AgentKind.ANTIGRAVITY -> "Protocol foundation installed"
++                        }
++                        Row(
++                            Modifier.fillMaxWidth().clickable { onSelectAgent(agent) }.padding(vertical = 11.dp),
++                            verticalAlignment = Alignment.CenterVertically,
++                        ) {
++                            Column(Modifier.weight(1f)) {
++                                Text(agent.title, fontWeight = FontWeight.SemiBold)
++                                Text(agent.subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
++                                Text(
++                                    statusText,
++                                    fontSize = 10.sp,
++                                    color = if (agent == AgentKind.CLAUDE_CODE) Color(0xFF58C9A3) else PocketOrange,
++                                )
++                            }
++                            SelectionDot(state.selectedAgent == agent)
++                        }
++                        if (index != AgentKind.entries.lastIndex) {
++                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
++                        }
++                    }
++                }
++            }
+ 
+             item {
+--- a/app/src/main/java/com/jarves/mh/ui/PocketDevApp.kt
++++ b/app/src/main/java/com/jarves/mh/ui/PocketDevApp.kt
+@@ -1582,6 +1582,7 @@
+                     },
+                     onDiscoverModels = viewModel::discoverModels,
+                     onValidateProvider = viewModel::validateProvider,
++                    onSelectAgent = viewModel::selectAgent,
+                     onSetThemeMode = viewModel::setThemeMode,
