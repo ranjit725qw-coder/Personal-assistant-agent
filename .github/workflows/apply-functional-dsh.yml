@@ -28,23 +28,23 @@ jobs:
         run: |
           set +e
           curl -fsSL https://raw.githubusercontent.com/techjarves/Mobile-Harness/15177fcb12bbd2afc8e281a79fb8185bb5daa5b8/app/src/main/java/com/jarves/mh/runtime/DshRuntimeBridge.kt \
-            -o app/src/main/java/com/jarves/mh/runtime/DshRuntimeBridge.kt 2>&1 | tee /tmp/integration.log
+            -o app/src/main/java/com/jarves/mh/runtime/DshRuntimeBridge.kt 2>&1 | tee /tmp/integration.txt
           status=${PIPESTATUS[0]}
           if [ "$status" -eq 0 ]; then
-            python3 scripts/apply_functional_dsh.py 2>&1 | tee -a /tmp/integration.log
+            python3 scripts/apply_functional_dsh.py 2>&1 | tee -a /tmp/integration.txt
             status=${PIPESTATUS[0]}
           fi
           if [ "$status" -eq 0 ]; then
             chmod +x gradlew
-            ./gradlew compileOnlineReleaseKotlin --stacktrace 2>&1 | tee -a /tmp/integration.log
+            ./gradlew compileOnlineReleaseKotlin --stacktrace 2>&1 | tee -a /tmp/integration.txt
             status=${PIPESTATUS[0]}
           fi
           mkdir -p diagnostics
-          tail -n 1000 /tmp/integration.log > diagnostics/functional-dsh-validation.log
+          tail -n 1000 /tmp/integration.txt > diagnostics/functional-dsh-validation.txt
           printf '%s\n' "$status" > diagnostics/functional-dsh-status.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java diagnostics
-          git commit -m "Apply functional DeepSeek runtime and record validation"
+          git add -f app/src/main/java diagnostics/functional-dsh-validation.txt diagnostics/functional-dsh-status.txt
+          git commit -m "Continue DeepSeek integration and record validation" || true
           git push
           exit "$status"
