@@ -1848,6 +1848,7 @@ private fun ProviderChoiceRow(
         ProviderKind.LLM_ROUTER -> Color(0xFF5B8DEF)
         ProviderKind.DEEPSEEK -> Color(0xFF4D6BFE)
         ProviderKind.KIMI -> Color(0xFF8B7CF6)
+        ProviderKind.NVIDIA_NIM -> Color(0xFF76B900)
         ProviderKind.CUSTOM -> PocketOrange
     }
     val mark = when (provider) {
@@ -1856,6 +1857,7 @@ private fun ProviderChoiceRow(
         ProviderKind.LLM_ROUTER -> "OR"
         ProviderKind.DEEPSEEK -> "DS"
         ProviderKind.KIMI -> "K"
+        ProviderKind.NVIDIA_NIM -> "NIM"
         ProviderKind.CUSTOM -> "<>"
     }
 
