@@ -31,7 +31,16 @@ object RuntimeLaunchConfigBuilder {
     fun build(profile: ProviderProfile, authToken: String? = null, localGatewayUrl: String? = null): RuntimeLaunchConfig {
         val environment = linkedMapOf("DISABLE_AUTOUPDATER" to "1")
         when (profile.kind.protocol) {
-            com.jarves.mh.model.ProviderProtocol.CLAUDE_LOGIN -> Unit
+            com.jarves.mh.model.ProviderProtocol.CLAUDE_LOGIN -> {
+                // Claude Code gives API-key variables precedence over OAuth. When a
+                // subscription token is available, isolate it from credentials left
+                // behind by a previously selected API provider.
+                if (!authToken.isNullOrBlank()) {
+                    environment["CLAUDE_CODE_OAUTH_TOKEN"] = authToken
+                    environment["ANTHROPIC_API_KEY"] = ""
+                    environment["ANTHROPIC_AUTH_TOKEN"] = ""
+                }
+            }
             com.jarves.mh.model.ProviderProtocol.ANTHROPIC -> {
                 environment["ANTHROPIC_BASE_URL"] = profile.baseUrl.trimEnd('/')
                 environment["ANTHROPIC_MODEL"] = profile.model
