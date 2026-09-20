@@ -17,7 +17,7 @@ jobs:
         id: patch
         continue-on-error: true
         run: |
-          base64 -d scripts/harden-github-connect.py.gz.b64 | gzip -d > /tmp/harden_github_connect.py
+          cat scripts/harden-github-connect.b64.* | base64 -d | gzip -d > /tmp/harden_github_connect.py
           python3 /tmp/harden_github_connect.py > github-connect-hardening-patch.txt 2>&1
           git diff --check >> github-connect-hardening-patch.txt 2>&1
       - uses: actions/setup-java@v5
