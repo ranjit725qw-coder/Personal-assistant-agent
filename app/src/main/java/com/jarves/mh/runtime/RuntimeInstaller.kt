@@ -63,6 +63,7 @@ class RuntimeInstaller(private val context: Context) {
     private val devStacksFile = File(rootfs, ".pocket-dev-stacks.json")
     private val dshMarker = File(rootfs, ".pocket-dsh-version")
     private val agyMarker = File(rootfs, ".pocket-agy-version")
+    private val githubCliMarker = File(rootfs, ".pocket-github-cli-version")
     private val dshAndroidCompatibilityMarker = File(rootfs, ".pocket-dsh-android-compat-version")
     private val macosMetadataRepairMarker = File(rootfs, ".pocket-macos-metadata-repair")
 
@@ -321,6 +322,50 @@ class RuntimeInstaller(private val context: Context) {
         agyMarker.writeText(AGY_VERSION)
         check(isAntigravityInstalled()) { "Antigravity CLI installation is incomplete" }
         onProgress(RuntimeInstallProgress("Antigravity CLI is ready", 1f, event = RuntimeInstallEvent.COMPLETED))
+    }
+
+    val githubCliVersion: String get() = githubCliMarker.readTextOrNull().orEmpty()
+
+    fun isGitHubCliInstalled(): Boolean = isInstalled() &&
+        File(rootfs, GITHUB_CLI_GUEST_PATH.removePrefix("/")).canExecute() &&
+        githubCliMarker.readTextOrNull() == GITHUB_CLI_VERSION
+
+    /** Installs GitHub's official ARM64 CLI on demand with a pinned checksum. */
+    suspend fun ensureGitHubCliInstalled(onProgress: suspend (RuntimeInstallProgress) -> Unit) {
+        if (isGitHubCliInstalled()) return
+        check(!BuildConfig.OFFLINE_RUNTIME_BUNDLES) { "GitHub sign-in needs the online APK." }
+        val runtime = installedRuntime()
+        downloads.mkdirs()
+        val archive = File(downloads, "gh-$GITHUB_CLI_VERSION-linux-arm64.tar.gz")
+        onProgress(RuntimeInstallProgress("Downloading official GitHub CLI", 0.05f))
+        downloadVerified(GITHUB_CLI_RELEASE_URL, archive, GITHUB_CLI_RELEASE_SHA256) { bytes, total ->
+            val ratio = if (total > 0L) bytes.toFloat() / total else 0f
+            onProgress(RuntimeInstallProgress("Downloading GitHub CLI $GITHUB_CLI_VERSION", 0.05f + ratio * 0.75f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
+        }
+        onProgress(RuntimeInstallProgress("Installing GitHub CLI $GITHUB_CLI_VERSION", 0.85f, indeterminate = true))
+        val destination = File(rootfs, GITHUB_CLI_GUEST_PATH.removePrefix("/"))
+        destination.parentFile?.mkdirs()
+        var found = false
+        TarArchiveInputStream(GzipCompressorInputStream(BufferedInputStream(archive.inputStream()))).use { tar ->
+            var entry = tar.nextEntry
+            while (entry != null) {
+                if (entry.isFile && entry.name.removePrefix("./").endsWith("/bin/gh")) {
+                    val staged = File(destination.parentFile, ".gh-$GITHUB_CLI_VERSION.installing")
+                    FileOutputStream(staged).use { tar.copyTo(it) }
+                    Os.chmod(staged.absolutePath, 0b111101101)
+                    Os.rename(staged.absolutePath, destination.absolutePath)
+                    found = true
+                    break
+                }
+                entry = tar.nextEntry
+            }
+        }
+        archive.delete()
+        check(found) { "Official GitHub CLI archive did not contain gh" }
+        verifyGuest(runtime.proot, "$GITHUB_CLI_GUEST_PATH --version", "GitHub CLI verification failed")
+        githubCliMarker.writeText(GITHUB_CLI_VERSION)
+        check(isGitHubCliInstalled()) { "GitHub CLI installation is incomplete" }
+        onProgress(RuntimeInstallProgress("GitHub CLI is ready", 1f, event = RuntimeInstallEvent.COMPLETED))
     }
 
     fun ensureDshAndroidCompatibility() {
@@ -1401,6 +1446,10 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
         private const val AGY_VERSION = "1.1.27"
         private const val AGY_RELEASE_URL = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.27-5211191891591168/linux-arm/cli_linux_arm64.tar.gz"
         private const val AGY_RELEASE_SHA512 = "ed45f6930785aa4b42f14e07ace1c9d91a94fb76e760f54acbd7d3d3951e1f957fd456a0dae2a3124dd9a3b689bf7afb7c9303a3e4ba95037fc10063424d9bf9"
+        const val GITHUB_CLI_GUEST_PATH = "/usr/local/bin/gh"
+        private const val GITHUB_CLI_VERSION = "2.100.0"
+        private const val GITHUB_CLI_RELEASE_URL = "https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_linux_arm64.tar.gz"
+        private const val GITHUB_CLI_RELEASE_SHA256 = "ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961"
         private const val LEGACY_README = "# Pocket Dev project\n\nThis project is managed locally on Android.\n"
         private const val LEGACY_INDEX = "<!doctype html><title>Pocket Dev</title><h1>Hello from Android</h1>\n"
         private const val ROOTFS_VERSION = "ubuntu-20.04.5-arm64"

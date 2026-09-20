@@ -1589,6 +1589,8 @@ private fun RootScreenHost(
                     onValidateProvider = viewModel::validateProvider,
                     onSelectAgent = viewModel::selectAgent,
                     onBeginAntigravityLogin = viewModel::beginAntigravityLogin,
+                    onConnectGitHub = viewModel::connectGitHub,
+                    onDisconnectGitHub = viewModel::disconnectGitHub,
                     onSubmitAntigravityCode = viewModel::submitAntigravityCode,
                     onLogoutAntigravity = viewModel::logoutAntigravity,
                     onRefreshAntigravityModels = viewModel::refreshAntigravityModels,
