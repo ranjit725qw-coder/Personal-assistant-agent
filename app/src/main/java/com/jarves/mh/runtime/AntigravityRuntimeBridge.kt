@@ -172,7 +172,13 @@ class AntigravityRuntimeBridge(
                     addAll(listOf("--output-format", "stream-json"))
                     addAll(listOf("--print-timeout", "2m"))
                     add("--dangerously-skip-permissions")
-                    addAntigravitySelection(model(), effort())
+                    val selectedModel = model()
+                    val selectedEffort = effort()
+                    if (selectedModel.isNotBlank()) {
+                        addAll(listOf("--model", selectedModel))
+                    } else if (selectedEffort in setOf("low", "medium", "high")) {
+                        addAll(listOf("--effort", selectedEffort))
+                    }
                     add("--new-project")
                 }
                 val outputFile = File(context.cacheDir, "agy-hello-${System.nanoTime()}.log")
