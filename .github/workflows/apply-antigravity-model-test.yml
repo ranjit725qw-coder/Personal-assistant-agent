@@ -1,0 +1,62 @@
+name: Apply Antigravity model test
+
+on:
+  push:
+    branches: [fix/antigravity-model-test]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Apply selected-model test
+        run: python3 scripts/apply_antigravity_model_test.py
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Verify Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${ANDROID_SDK_ROOT:-}"
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort -V | tail -n 1)"
+          test -x "$SDKMANAGER"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+
+      - name: Install required SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+
+      - name: Compile online release
+        run: |
+          chmod +x gradlew
+          ./gradlew compileOnlineReleaseKotlin --stacktrace
+
+      - name: Commit validated source changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/jarves/mh/ui/MainViewModel.kt \
+                  app/src/main/java/com/jarves/mh/ui/SettingsScreenModern.kt \
+                  app/src/main/java/com/jarves/mh/ui/PocketDevApp.kt
+          if git diff --cached --quiet; then
+            echo "No source changes to commit"
+          else
+            git commit -m "Add selected Antigravity model test"
+            git push
+          fi
