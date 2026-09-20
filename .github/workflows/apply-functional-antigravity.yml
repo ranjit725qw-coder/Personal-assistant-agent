@@ -1,0 +1,40 @@
+name: Apply functional Antigravity runtime
+on:
+  push:
+    branches: [sync/functional-antigravity-runtime]
+    paths:
+      - scripts/apply_functional_antigravity.py
+      - .github/workflows/apply-functional-antigravity.yml
+permissions:
+  contents: write
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: sync/functional-antigravity-runtime
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Import, adapt, compile, and record
+        shell: bash
+        run: |
+          set +e
+          upstream=https://raw.githubusercontent.com/techjarves/Mobile-Harness/15177fcb12bbd2afc8e281a79fb8185bb5daa5b8/app/src/main/java/com/jarves/mh/runtime
+          curl -fsSL "$upstream/AntigravityAuthController.kt" -o app/src/main/java/com/jarves/mh/runtime/AntigravityAuthController.kt
+          status=$?
+          if [ "$status" -eq 0 ]; then curl -fsSL "$upstream/AntigravityRuntimeBridge.kt" -o app/src/main/java/com/jarves/mh/runtime/AntigravityRuntimeBridge.kt; status=$?; fi
+          if [ "$status" -eq 0 ]; then python3 scripts/apply_functional_antigravity.py; status=$?; fi
+          if [ "$status" -eq 0 ]; then chmod +x gradlew; ./gradlew compileOnlineReleaseKotlin --stacktrace > /tmp/antigravity.log 2>&1; status=$?; fi
+          mkdir -p diagnostics
+          tail -n 1000 /tmp/antigravity.log 2>/dev/null > diagnostics/functional-antigravity-validation.txt || true
+          printf '%s\n' "$status" > diagnostics/functional-antigravity-status.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f app/src/main/java diagnostics
+          git commit -m 'Integrate functional Antigravity runtime and Google OAuth' || true
+          git push
+          exit "$status"
