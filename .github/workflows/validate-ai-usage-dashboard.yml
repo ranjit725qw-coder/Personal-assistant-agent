@@ -12,15 +12,8 @@ jobs:
         with: { fetch-depth: 0 }
       - name: Apply implementation
         run: |
-          if ! python3 scripts/implement_ai_usage_dashboard.py > validation.txt 2>&1; then
-            cat validation.txt
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -f validation.txt
-            git commit -m "Capture dashboard patch failure"
-            git push
-            exit 1
-          fi
+          python3 scripts/implement_ai_usage_dashboard.py
+          python3 scripts/fix_usage_ui.py
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -34,18 +27,10 @@ jobs:
       - name: Compile and commit
         run: |
           chmod +x gradlew
-          if ! ./gradlew compileOnlineReleaseKotlin --stacktrace > validation.txt 2>&1; then
-            tail -n 300 validation.txt
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -f validation.txt
-            git commit -m "Capture dashboard compile failure"
-            git push
-            exit 1
-          fi
+          ./gradlew compileOnlineReleaseKotlin --stacktrace
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          rm -f validation.txt
+          git rm -f --ignore-unmatch validation.txt
           git add app/src/main/java/com/jarves/mh/data/AiUsageStore.kt app/src/main/java/com/jarves/mh/ui/MainViewModel.kt app/src/main/java/com/jarves/mh/ui/PocketDevApp.kt
           git commit -m "Add daily AI usage and API key dashboard"
           git push
