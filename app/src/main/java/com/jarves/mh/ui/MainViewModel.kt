@@ -808,7 +808,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         if (agent == AgentKind.ANTIGRAVITY) {
-            _state.update { it.copy(toastMessage = "Antigravity still needs its Google sign-in activeRuntime(). It is not active yet.") }
+            _state.update { it.copy(toastMessage = "Antigravity requires Google sign-in and is not available yet.") }
             return
         }
         if (agent == AgentKind.CLAUDE_CODE || installer.isDeepSeekHarnessInstalled()) {
