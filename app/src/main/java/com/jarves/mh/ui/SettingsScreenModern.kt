@@ -1,5 +1,8 @@
 package com.jarves.mh.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -27,6 +30,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Check
@@ -113,6 +117,8 @@ fun SettingsScreen(
     onLogoutAntigravity: () -> Unit,
     onConnectGitHub: () -> Unit,
     onDisconnectGitHub: () -> Unit,
+    onCancelGitHub: () -> Unit,
+    onRefreshGitHub: () -> Unit,
     onRefreshAntigravityModels: () -> Unit,
     onTestAntigravityModel: () -> Unit,
     onSetAntigravityModel: (String) -> Unit,
@@ -466,7 +472,7 @@ fun SettingsScreen(
                     expanded = expanded == SettingsSection.GITHUB,
                     onClick = { toggle(SettingsSection.GITHUB) },
                 ) {
-                    Text("Uses GitHub's official device sign-in and CLI. No token is stored in the app UI.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Uses GitHub's official device sign-in and CLI. Credentials stay in app-private CLI storage with restrictive permissions; Android backup is disabled. Tokens are never shown in the UI or logs.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     when (state.githubAuthStatus) {
                         GitHubAuthStatus.CONNECTED -> {
                             Text(state.githubMessage ?: "Connected as @${state.githubLogin}", color = Color(0xFF58C9A3), fontWeight = FontWeight.SemiBold)
@@ -476,17 +482,40 @@ fun SettingsScreen(
                         GitHubAuthStatus.STARTING -> {
                             LinearProgressIndicator(Modifier.fillMaxWidth())
                             Text(state.githubMessage ?: "Preparing GitHub sign-in…", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (state.githubCanCancel) {
+                                OutlinedButton(onClick = onCancelGitHub, modifier = Modifier.fillMaxWidth()) { Text("Cancel GitHub sign-in") }
+                            }
                         }
                         GitHubAuthStatus.AWAITING_USER -> {
                             Text(state.githubMessage ?: "Enter this code on GitHub", fontSize = 12.sp)
                             Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
-                                Text(state.githubUserCode.orEmpty(), Modifier.padding(16.dp), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                                SelectionContainer {
+                                    Text(state.githubUserCode.orEmpty(), Modifier.padding(16.dp), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
+                            OutlinedButton(
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("GitHub one-time code", state.githubUserCode.orEmpty()))
+                                },
+                                enabled = !state.githubUserCode.isNullOrBlank(),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("Copy one-time code") }
                             Button(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(state.githubVerificationUri ?: "https://github.com/login/device"))) }, modifier = Modifier.fillMaxWidth()) { Text("Open GitHub authorization") }
+                            OutlinedButton(onClick = onCancelGitHub, modifier = Modifier.fillMaxWidth()) { Text("Cancel GitHub sign-in") }
                         }
-                        GitHubAuthStatus.DISCONNECTED, GitHubAuthStatus.ERROR -> {
-                            state.githubMessage?.let { Text(it, fontSize = 12.sp, color = if (state.githubAuthStatus == GitHubAuthStatus.ERROR) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant) }
-                            Button(onClick = onConnectGitHub, modifier = Modifier.fillMaxWidth()) { Text(if (state.githubAuthStatus == GitHubAuthStatus.ERROR) "Retry GitHub sign-in" else "Connect GitHub") }
+                        GitHubAuthStatus.DISCONNECTED -> {
+                            state.githubMessage?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            Button(onClick = onConnectGitHub, modifier = Modifier.fillMaxWidth()) { Text("Connect GitHub") }
+                        }
+                        GitHubAuthStatus.ERROR -> {
+                            state.githubMessage?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
+                            if (state.githubLogin.isNullOrBlank()) {
+                                Button(onClick = onConnectGitHub, modifier = Modifier.fillMaxWidth()) { Text("Retry GitHub sign-in") }
+                            } else {
+                                Button(onClick = onRefreshGitHub, modifier = Modifier.fillMaxWidth()) { Text("Retry connection check") }
+                                OutlinedButton(onClick = onDisconnectGitHub, modifier = Modifier.fillMaxWidth()) { Text("Disconnect GitHub") }
+                            }
                         }
                     }
                 }
