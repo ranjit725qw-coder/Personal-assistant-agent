@@ -1018,6 +1018,10 @@ class RuntimeInstaller(private val context: Context) {
         guestCommand: List<String>,
         guestWorkspacePath: String = "/workspace",
         emulateHardLinks: Boolean = true,
+        outputFile: File = File(context.cacheDir, "runtime-output-${System.nanoTime()}.log"),
+        pseudoTerminal: Boolean = false,
+        ptyRows: Int = 40,
+        ptyColumns: Int = 120,
     ): Process {
         require(
             guestWorkspacePath == "/workspace" ||
@@ -1087,7 +1091,10 @@ class RuntimeInstaller(private val context: Context) {
                 putAll(environment)
             },
             cwd = context.filesDir.absolutePath,
-            outputFile = File(context.cacheDir, "runtime-output-${System.nanoTime()}.log"),
+            outputFile = outputFile,
+            pseudoTerminal = pseudoTerminal,
+            ptyRows = ptyRows,
+            ptyColumns = ptyColumns,
         )
     }
 
