@@ -38,6 +38,14 @@ class AppPreferences(private val context: Context) {
         get() = preferences.getString("selected_agent_kind", AgentKind.CLAUDE_CODE.name) ?: AgentKind.CLAUDE_CODE.name
         set(value) { preferences.edit().putString("selected_agent_kind", value).apply() }
 
+    var antigravityModel: String
+        get() = preferences.getString("agent_antigravity_model", "") ?: ""
+        set(value) { preferences.edit().putString("agent_antigravity_model", value).apply() }
+
+    var antigravityEffort: String
+        get() = preferences.getString("agent_antigravity_effort", "high") ?: "high"
+        set(value) { preferences.edit().putString("agent_antigravity_effort", value).apply() }
+
     var legacySeededCredentialRemoved: Boolean
         get() = preferences.getBoolean("legacy_seeded_credential_removed", false)
         set(value) { preferences.edit().putBoolean("legacy_seeded_credential_removed", value).apply() }

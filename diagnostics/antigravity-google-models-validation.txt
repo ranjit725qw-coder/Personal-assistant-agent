@@ -1,0 +1,53 @@
+
+Welcome to Gradle 8.14!
+
+Here are the highlights of this release:
+ - Java 24 support
+ - GraalVM Native Image toolchain selection
+ - Enhancements to test reporting
+ - Build Authoring improvements
+
+For more details see https://docs.gradle.org/8.14/release-notes.html
+
+Starting a Gradle Daemon (subsequent builds will be faster)
+
+> Configure project :app
+Checking the license for package NDK (Side by side) 26.1.10909125 in /usr/local/lib/android/sdk/licenses
+License for package NDK (Side by side) 26.1.10909125 accepted.
+Preparing "Install NDK (Side by side) 26.1.10909125 v.26.1.10909125".
+"Install NDK (Side by side) 26.1.10909125 v.26.1.10909125" ready.
+Installing NDK (Side by side) 26.1.10909125 in /usr/local/lib/android/sdk/ndk/26.1.10909125
+"Install NDK (Side by side) 26.1.10909125 v.26.1.10909125" complete.
+"Install NDK (Side by side) 26.1.10909125 v.26.1.10909125" finished.
+
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preOnlineReleaseBuild UP-TO-DATE
+> Task :app:generateOnlineReleaseBuildConfig
+> Task :app:checkOnlineReleaseAarMetadata
+> Task :app:processOnlineReleaseNavigationResources
+> Task :app:generateOnlineReleaseResValues
+> Task :app:compileOnlineReleaseNavigationResources
+> Task :app:mapOnlineReleaseSourceSetPaths
+> Task :app:generateOnlineReleaseResources
+> Task :app:packageOnlineReleaseResources
+> Task :app:createOnlineReleaseCompatibleScreenManifests
+> Task :app:extractDeepLinksOnlineRelease
+> Task :app:mergeOnlineReleaseResources
+> Task :app:parseOnlineReleaseLocalResources
+> Task :app:processOnlineReleaseMainManifest
+> Task :app:processOnlineReleaseManifest
+> Task :app:processOnlineReleaseManifestForPackage
+> Task :app:processOnlineReleaseResources
+> Task :app:compileOnlineReleaseKotlin
+w: file:///home/runner/work/Personal-assistant-agent/Personal-assistant-agent/app/src/main/java/com/jarves/mh/runtime/AndroidAppInstaller.kt:23:31 'static field ACTION_INSTALL_PACKAGE: String' is deprecated. Deprecated in Java.
+w: file:///home/runner/work/Personal-assistant-agent/Personal-assistant-agent/app/src/main/java/com/jarves/mh/ui/MainViewModel.kt:820:25 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'File?'.
+w: file:///home/runner/work/Personal-assistant-agent/Personal-assistant-agent/app/src/main/java/com/jarves/mh/ui/MainViewModel.kt:822:17 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'File?'.
+w: file:///home/runner/work/Personal-assistant-agent/Personal-assistant-agent/app/src/main/java/com/jarves/mh/ui/PocketDevApp.kt:2250:57 'val Icons.Filled.Chat: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.Chat.
+w: file:///home/runner/work/Personal-assistant-agent/Personal-assistant-agent/app/src/main/java/com/jarves/mh/ui/TerminalScreen.kt:460:53 'val Icons.Filled.ArrowBack: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ArrowBack.
+w: file:///home/runner/work/Personal-assistant-agent/Personal-assistant-agent/app/src/main/java/com/jarves/mh/ui/TerminalScreen.kt:463:53 'val Icons.Filled.ArrowForward: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ArrowForward.
+w: file:///home/runner/work/Personal-assistant-agent/Personal-assistant-agent/app/src/main/java/com/jarves/mh/ui/VoiceReader.kt:80:34 This declaration overrides a deprecated member but is not marked as deprecated itself. Add the '@Deprecated' annotation or suppress the diagnostic.
+w: file:///home/runner/work/Personal-assistant-agent/Personal-assistant-agent/app/src/main/java/com/jarves/mh/ui/VoiceReader.kt:148:82 'val Icons.Filled.VolumeUp: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.VolumeUp.
+
+BUILD SUCCESSFUL in 1m 14s
+17 actionable tasks: 17 executed
