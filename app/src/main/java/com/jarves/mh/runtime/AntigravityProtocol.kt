@@ -89,7 +89,7 @@ internal fun antigravityCommand(
     effort: String,
     conversationId: String?,
 ): List<String> = buildList {
-    add("/usr/local/bin/agy")
+    add(RuntimeInstaller.AGY_GUEST_PATH)
     addAll(listOf("--input-format", "stream-json"))
     addAll(listOf("--output-format", "stream-json"))
     addAll(listOf("--print-timeout", "60m"))
