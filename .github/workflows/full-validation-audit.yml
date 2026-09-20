@@ -10,18 +10,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          submodules: recursive
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
           cache: gradle
       - name: Configure Android SDK
-        shell: bash
         run: |
-          set -euo pipefail
           SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort -V | tail -n 1)"
-          test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
       - name: Source integrity checks
@@ -30,23 +29,38 @@ jobs:
           test ! -e validation.txt
           test ! -e scripts/implement_ai_usage_dashboard.py
           test ! -e scripts/fix_usage_ui.py
-      - name: Compile, unit test, lint and assemble
+      - name: Compile, test, lint and assemble
         id: gradle
         continue-on-error: true
-        run: |
-          chmod +x gradlew
-          ./gradlew clean compileOnlineReleaseKotlin testOnlineReleaseUnitTest lintOnlineRelease assembleOnlineRelease --stacktrace > audit-result.txt 2>&1
-      - name: Persist audit result
-        if: always()
         shell: bash
         run: |
-          set -e
+          set +e
+          : > audit-result.txt
+          chmod +x gradlew
+          failed=0
+          run_check() {
+            label="$1"; shift
+            echo "===== $label =====" | tee -a audit-result.txt
+            "$@" >> audit-result.txt 2>&1
+            code=$?
+            echo "RESULT $label: $code" | tee -a audit-result.txt
+            if [ "$code" -ne 0 ]; then failed=1; fi
+          }
+          run_check CLEAN ./gradlew clean --stacktrace
+          run_check COMPILE ./gradlew compileOnlineReleaseKotlin --stacktrace
+          run_check UNIT_TESTS ./gradlew testOnlineReleaseUnitTest --stacktrace
+          run_check LINT ./gradlew lintOnlineRelease --stacktrace
+          run_check ASSEMBLE ./gradlew assembleOnlineDebug --stacktrace
+          exit "$failed"
+      - name: Persist audit result
+        if: always()
+        run: |
           echo >> audit-result.txt
           echo "AUDIT_OUTCOME=${{ steps.gradle.outcome }}" >> audit-result.txt
-          tail -n 500 audit-result.txt > audit-tail.txt
+          tail -n 700 audit-result.txt > audit-tail.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f audit-result.txt audit-tail.txt
-          git commit -m "Record full validation audit result"
+          git commit -m "Record submodule-aware validation result"
           git push
           test "${{ steps.gradle.outcome }}" = "success"
