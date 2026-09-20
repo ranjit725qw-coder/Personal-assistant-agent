@@ -46,6 +46,10 @@ class AppPreferences(private val context: Context) {
         get() = preferences.getString("agent_antigravity_effort", "high") ?: "high"
         set(value) { preferences.edit().putString("agent_antigravity_effort", value).apply() }
 
+    var githubLogin: String
+        get() = preferences.getString("github_login", "") ?: ""
+        set(value) { preferences.edit().putString("github_login", value).apply() }
+
     var legacySeededCredentialRemoved: Boolean
         get() = preferences.getBoolean("legacy_seeded_credential_removed", false)
         set(value) { preferences.edit().putBoolean("legacy_seeded_credential_removed", value).apply() }

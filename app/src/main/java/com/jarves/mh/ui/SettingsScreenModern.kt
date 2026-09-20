@@ -98,7 +98,7 @@ import com.jarves.mh.ui.theme.AppThemeMode
 import com.jarves.mh.ui.theme.PocketOrange
 import kotlinx.coroutines.launch
 
-private enum class SettingsSection { AGENT, CONNECTION, APPEARANCE, TOOLS, RUNTIME, APP_UPDATE, UPDATE_CHANNEL }
+private enum class SettingsSection { AGENT, GITHUB, CONNECTION, APPEARANCE, TOOLS, RUNTIME, APP_UPDATE, UPDATE_CHANNEL }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -111,6 +111,8 @@ fun SettingsScreen(
     onBeginAntigravityLogin: () -> Unit,
     onSubmitAntigravityCode: (String) -> Unit,
     onLogoutAntigravity: () -> Unit,
+    onConnectGitHub: () -> Unit,
+    onDisconnectGitHub: () -> Unit,
     onRefreshAntigravityModels: () -> Unit,
     onTestAntigravityModel: () -> Unit,
     onSetAntigravityModel: (String) -> Unit,
@@ -452,6 +454,40 @@ fun SettingsScreen(
                             }
                         }
                         if (index != AgentKind.entries.lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    }
+                }
+            }
+
+            item {
+                SettingsAccordion(
+                    title = "GitHub",
+                    subtitle = state.githubLogin?.let { "Connected as @$it" } ?: "Connect repositories and private Git history",
+                    icon = Icons.Default.Code,
+                    expanded = expanded == SettingsSection.GITHUB,
+                    onClick = { toggle(SettingsSection.GITHUB) },
+                ) {
+                    Text("Uses GitHub's official device sign-in and CLI. No token is stored in the app UI.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    when (state.githubAuthStatus) {
+                        GitHubAuthStatus.CONNECTED -> {
+                            Text(state.githubMessage ?: "Connected as @${state.githubLogin}", color = Color(0xFF58C9A3), fontWeight = FontWeight.SemiBold)
+                            Text("Private HTTPS repository URLs can now be cloned from the project import option. Git push, pull and PR commands work through the terminal.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            OutlinedButton(onClick = onDisconnectGitHub, modifier = Modifier.fillMaxWidth()) { Text("Disconnect GitHub") }
+                        }
+                        GitHubAuthStatus.STARTING -> {
+                            LinearProgressIndicator(Modifier.fillMaxWidth())
+                            Text(state.githubMessage ?: "Preparing GitHub sign-in…", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        GitHubAuthStatus.AWAITING_USER -> {
+                            Text(state.githubMessage ?: "Enter this code on GitHub", fontSize = 12.sp)
+                            Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                                Text(state.githubUserCode.orEmpty(), Modifier.padding(16.dp), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Button(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(state.githubVerificationUri ?: "https://github.com/login/device"))) }, modifier = Modifier.fillMaxWidth()) { Text("Open GitHub authorization") }
+                        }
+                        GitHubAuthStatus.DISCONNECTED, GitHubAuthStatus.ERROR -> {
+                            state.githubMessage?.let { Text(it, fontSize = 12.sp, color = if (state.githubAuthStatus == GitHubAuthStatus.ERROR) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant) }
+                            Button(onClick = onConnectGitHub, modifier = Modifier.fillMaxWidth()) { Text(if (state.githubAuthStatus == GitHubAuthStatus.ERROR) "Retry GitHub sign-in" else "Connect GitHub") }
+                        }
                     }
                 }
             }
