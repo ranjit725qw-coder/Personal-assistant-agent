@@ -119,6 +119,8 @@ fun SettingsScreen(
     onDisconnectGitHub: () -> Unit,
     onCancelGitHub: () -> Unit,
     onRefreshGitHub: () -> Unit,
+    onRefreshGitHubRepositories: () -> Unit,
+    onCloneGitHubRepository: (GitHubRepository) -> Unit,
     onRefreshAntigravityModels: () -> Unit,
     onTestAntigravityModel: () -> Unit,
     onSetAntigravityModel: (String) -> Unit,
@@ -152,12 +154,20 @@ fun SettingsScreen(
     var terminalCleared by remember { mutableStateOf(false) }
     var antigravityCode by rememberSaveable { mutableStateOf("") }
     var showAntigravityModels by rememberSaveable { mutableStateOf(false) }
+    var showGitHubRepositories by rememberSaveable { mutableStateOf(false) }
+    var githubRepositorySearch by rememberSaveable { mutableStateOf("") }
     var showReliabilityHelp by rememberSaveable { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val filteredModels = remember(models, modelSearch) {
         val query = modelSearch.trim()
         if (query.isBlank()) models else models.filter {
             it.id.contains(query, true) || it.displayName.contains(query, true)
+        }
+    }
+    val filteredGitHubRepositories = remember(state.githubRepositories, githubRepositorySearch) {
+        val query = githubRepositorySearch.trim()
+        if (query.isBlank()) state.githubRepositories else state.githubRepositories.filter { repository ->
+            repository.nameWithOwner.contains(query, true) || repository.description.contains(query, true)
         }
     }
 
@@ -223,6 +233,71 @@ fun SettingsScreen(
                                     Text(modelId, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 SelectionDot(state.antigravityModel == modelId)
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showGitHubRepositories) {
+        ModalBottomSheet(
+            onDismissRequest = { showGitHubRepositories = false },
+            sheetState = sheetState,
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(Modifier.fillMaxWidth().fillMaxHeight(0.82f).padding(horizontal = 20.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("GitHub repositories", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text(state.githubRepositoryMessage ?: "Choose a repository to clone and open", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = onRefreshGitHubRepositories, enabled = !state.githubRepositoriesLoading && state.githubCloneInProgress == null) {
+                        if (state.githubRepositoriesLoading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        else Icon(Icons.Default.Refresh, "Refresh repositories")
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = githubRepositorySearch,
+                    onValueChange = { githubRepositorySearch = it },
+                    leadingIcon = { Icon(Icons.Default.Search, null) },
+                    placeholder = { Text("Search repositories") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(10.dp))
+                if (state.githubRepositoriesLoading && state.githubRepositories.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                } else if (filteredGitHubRepositories.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(state.githubRepositoryMessage ?: "No repositories found", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 24.dp)) {
+                        items(filteredGitHubRepositories, key = { it.nameWithOwner }) { repository ->
+                            Row(
+                                Modifier.fillMaxWidth().padding(vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(repository.nameWithOwner, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(if (repository.isPrivate) "PRIVATE" else "PUBLIC", fontSize = 9.sp, color = if (repository.isPrivate) PocketOrange else Color(0xFF58C9A3), fontWeight = FontWeight.Bold)
+                                    }
+                                    if (repository.description.isNotBlank()) Text(repository.description, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                OutlinedButton(
+                                    onClick = { onCloneGitHubRepository(repository) },
+                                    enabled = state.githubCloneInProgress == null,
+                                    contentPadding = PaddingValues(horizontal = 12.dp),
+                                ) {
+                                    if (state.githubCloneInProgress == repository.nameWithOwner) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    else Text("Clone")
+                                }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
                         }
@@ -476,7 +551,22 @@ fun SettingsScreen(
                     when (state.githubAuthStatus) {
                         GitHubAuthStatus.CONNECTED -> {
                             Text(state.githubMessage ?: "Connected as @${state.githubLogin}", color = Color(0xFF58C9A3), fontWeight = FontWeight.SemiBold)
-                            Text("Private HTTPS repository URLs can now be cloned from the project import option. Git push, pull and PR commands work through the terminal.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Browse your public and private repositories, clone one as a project, then work in its chat or terminal.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Button(
+                                onClick = {
+                                    showGitHubRepositories = true
+                                    if (state.githubRepositories.isEmpty()) onRefreshGitHubRepositories()
+                                },
+                                enabled = state.githubCloneInProgress == null,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Icon(Icons.Default.Search, null, Modifier.size(17.dp))
+                                Spacer(Modifier.width(7.dp))
+                                Text("Browse repositories")
+                            }
+                            state.githubRepositoryMessage?.let { message ->
+                                Text(message, fontSize = 11.sp, color = if (message.contains("failed", true) || message.contains("could not", true)) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                             OutlinedButton(onClick = onDisconnectGitHub, modifier = Modifier.fillMaxWidth()) { Text("Disconnect GitHub") }
                         }
                         GitHubAuthStatus.STARTING -> {

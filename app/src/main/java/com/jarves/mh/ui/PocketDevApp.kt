@@ -312,6 +312,7 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onKeepFileChange = viewModel::keepFileChange,
             onCreateChat = viewModel::createChat,
             onSwitchChat = viewModel::switchChat,
+            onSwitchProject = viewModel::switchActiveProject,
             onTerminalRun = viewModel::requestProjectTerminalCommand,
             onTerminalInput = viewModel::sendProjectTerminalInput,
             onTerminalInterrupt = viewModel::interruptProjectTerminalCommand,
@@ -1593,6 +1594,8 @@ private fun RootScreenHost(
                     onDisconnectGitHub = viewModel::disconnectGitHub,
                     onCancelGitHub = viewModel::cancelGitHubConnection,
                     onRefreshGitHub = viewModel::refreshGitHubConnectionNow,
+                    onRefreshGitHubRepositories = viewModel::refreshGitHubRepositories,
+                    onCloneGitHubRepository = viewModel::cloneGitHubRepository,
                     onSubmitAntigravityCode = viewModel::submitAntigravityCode,
                     onLogoutAntigravity = viewModel::logoutAntigravity,
                     onRefreshAntigravityModels = viewModel::refreshAntigravityModels,
@@ -2778,6 +2781,7 @@ private fun WorkspaceScreen(
     onKeepFileChange: (String) -> Unit,
     onCreateChat: () -> Unit,
     onSwitchChat: (String) -> Unit,
+    onSwitchProject: (Project) -> Unit,
     onTerminalRun: (String) -> Unit,
     onTerminalInput: (String) -> Unit,
     onTerminalInterrupt: () -> Unit,
@@ -3000,6 +3004,9 @@ private fun WorkspaceScreen(
                 WorkspaceTab.CHAT -> ChatTab(
                     state.messages,
                     state.pendingApproval,
+                    projects = state.projects,
+                    activeProjectId = state.activeProject?.id,
+                    onSelectProject = onSwitchProject,
                     state.liveProcess,
                     state.isRunning,
                     onSend,
@@ -3374,6 +3381,9 @@ private fun FilesTab(
 private fun ChatTab(
     messages: List<ChatMessage>,
     approval: ToolRequest?,
+    projects: List<Project>,
+    activeProjectId: String?,
+    onSelectProject: (Project) -> Unit,
     liveProcess: List<ActivityItem>,
     isRunning: Boolean,
     onSend: (String) -> Unit,
@@ -3478,6 +3488,44 @@ private fun ChatTab(
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
+                var projectMenuExpanded by remember { mutableStateOf(false) }
+                val activeProject = projects.firstOrNull { it.id == activeProjectId }
+                Box(Modifier.fillMaxWidth().padding(bottom = 7.dp)) {
+                    AssistChip(
+                        onClick = { if (!isRunning) projectMenuExpanded = true },
+                        enabled = !isRunning && projects.isNotEmpty(),
+                        label = {
+                            Text(
+                                "Project: ${activeProject?.name ?: "Select project"}",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                        leadingIcon = { Icon(Icons.Default.Folder, null, Modifier.size(17.dp)) },
+                        trailingIcon = { Icon(Icons.Default.KeyboardArrowDown, null, Modifier.size(17.dp)) },
+                    )
+                    DropdownMenu(
+                        expanded = projectMenuExpanded,
+                        onDismissRequest = { projectMenuExpanded = false },
+                    ) {
+                        projects.forEach { project ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(project.name, fontWeight = if (project.id == activeProjectId) FontWeight.Bold else FontWeight.Normal)
+                                        Text(project.description, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                                    }
+                                },
+                                leadingIcon = { Icon(Icons.Default.Folder, null) },
+                                enabled = project.id != activeProjectId,
+                                onClick = {
+                                    projectMenuExpanded = false
+                                    onSelectProject(project)
+                                },
+                            )
+                        }
+                    }
+                }
                 if (pendingAttachments.isNotEmpty()) {
                     Row(
                         Modifier
