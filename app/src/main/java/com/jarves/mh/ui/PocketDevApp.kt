@@ -1587,6 +1587,7 @@ private fun RootScreenHost(
                     onSubmitAntigravityCode = viewModel::submitAntigravityCode,
                     onLogoutAntigravity = viewModel::logoutAntigravity,
                     onRefreshAntigravityModels = viewModel::refreshAntigravityModels,
+                    onTestAntigravityModel = viewModel::testAntigravityModel,
                     onSetAntigravityModel = viewModel::setAntigravityModel,
                     onSetAntigravityEffort = viewModel::setAntigravityEffort,
                     onSetThemeMode = viewModel::setThemeMode,

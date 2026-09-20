@@ -112,6 +112,7 @@ fun SettingsScreen(
     onSubmitAntigravityCode: (String) -> Unit,
     onLogoutAntigravity: () -> Unit,
     onRefreshAntigravityModels: () -> Unit,
+    onTestAntigravityModel: () -> Unit,
     onSetAntigravityModel: (String) -> Unit,
     onSetAntigravityEffort: (String) -> Unit,
     onSetThemeMode: (AppThemeMode) -> Unit,
@@ -406,6 +407,30 @@ fun SettingsScreen(
                                         Icon(Icons.Default.Refresh, null, Modifier.size(17.dp))
                                         Spacer(Modifier.width(7.dp))
                                         Text("Refresh Google AI models")
+                                    }
+                                    Button(
+                                        onClick = onTestAntigravityModel,
+                                        enabled = state.antigravityModel.isNotBlank() &&
+                                            !state.antigravityModelsLoading &&
+                                            state.antigravityModelTestStatus != ApiPingStatus.PINGING,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        if (state.antigravityModelTestStatus == ApiPingStatus.PINGING) {
+                                            CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+                                            Spacer(Modifier.width(7.dp))
+                                        }
+                                        Text(if (state.antigravityModelTestStatus == ApiPingStatus.PINGING) "Testing selected model…" else "Test selected model")
+                                    }
+                                    state.antigravityModelTestMessage?.let { message ->
+                                        Text(
+                                            message,
+                                            fontSize = 11.sp,
+                                            color = when (state.antigravityModelTestStatus) {
+                                                ApiPingStatus.OK -> Color(0xFF58C9A3)
+                                                ApiPingStatus.FAILED -> MaterialTheme.colorScheme.error
+                                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                        )
                                     }
                                     OutlinedButton(onClick = onLogoutAntigravity, modifier = Modifier.fillMaxWidth()) { Text("Sign out of Google") }
                                 }
