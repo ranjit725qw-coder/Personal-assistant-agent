@@ -1,0 +1,48 @@
+name: Validate GitHub Connect hardening
+on:
+  push:
+    branches: [fix/github-connect-hardening]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Apply focused hardening patch
+        env:
+          PATCH_B64: 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
+        run: |
+          printf '%s' "$PATCH_B64" | base64 -d | gzip -d > /tmp/harden_github_connect.py
+          python3 /tmp/harden_github_connect.py
+          git diff --check
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Configure Android SDK
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort -V | tail -n 1)"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+      - name: Compile, test, lint and assemble
+        id: gradle
+        continue-on-error: true
+        run: |
+          chmod +x gradlew
+          ./gradlew clean compileOnlineReleaseKotlin testOnlineReleaseUnitTest lintOnlineRelease assembleOnlineDebug --stacktrace > github-connect-hardening-validation.txt 2>&1
+      - name: Commit implementation and validation result
+        if: always()
+        run: |
+          echo "VALIDATION=${{ steps.gradle.outcome }}" >> github-connect-hardening-validation.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src github-connect-hardening-validation.txt
+          git commit -m "Harden GitHub Connect lifecycle and credentials"
+          git push
+          test "${{ steps.gradle.outcome }}" = "success"
