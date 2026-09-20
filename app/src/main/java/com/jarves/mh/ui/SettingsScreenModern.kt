@@ -90,6 +90,7 @@ import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.DevStack
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
+import com.jarves.mh.runtime.AntigravityAuthStatus
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.DiscoveredModel
 import com.jarves.mh.network.ModelDiscoveryResult
@@ -107,6 +108,9 @@ fun SettingsScreen(
     onDiscoverModels: suspend (ProviderProfile, String) -> ModelDiscoveryResult,
     onValidateProvider: suspend (ProviderProfile, String, List<DiscoveredModel>) -> ConnectionValidation,
     onSelectAgent: (AgentKind) -> Unit,
+    onBeginAntigravityLogin: () -> Unit,
+    onSubmitAntigravityCode: (String) -> Unit,
+    onLogoutAntigravity: () -> Unit,
     onSetThemeMode: (AppThemeMode) -> Unit,
     onPing: () -> Unit,
     onClearTerminal: () -> Unit,
@@ -134,6 +138,7 @@ fun SettingsScreen(
     var status by remember { mutableStateOf<String?>(null) }
     var statusOk by remember { mutableStateOf(false) }
     var terminalCleared by remember { mutableStateOf(false) }
+    var antigravityCode by rememberSaveable { mutableStateOf("") }
     var showReliabilityHelp by rememberSaveable { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val filteredModels = remember(models, modelSearch) {
@@ -295,7 +300,7 @@ fun SettingsScreen(
                             installed && state.selectedAgent == agent -> "Active"
                             installed -> "Installed · tap to activate"
                             agent == AgentKind.DEEPSEEK_HARNESS -> "Tap to download and install"
-                            agent == AgentKind.ANTIGRAVITY -> "Unavailable · Google sign-in runtime pending"
+                            agent == AgentKind.ANTIGRAVITY -> "Tap to download and install"
                             else -> "Ready"
                         }
                         Row(
@@ -309,6 +314,29 @@ fun SettingsScreen(
                                 if (installing) LinearProgressIndicator(progress = { state.agentInstallProgress }, modifier = Modifier.fillMaxWidth().padding(top = 5.dp))
                             }
                             SelectionDot(state.selectedAgent == agent)
+                        }
+                        if (agent == AgentKind.ANTIGRAVITY && installed) {
+                            when (state.antigravityAuth.status) {
+                                AntigravityAuthStatus.SIGNED_IN -> {
+                                    Text(state.antigravityAuth.message ?: "Google account connected", fontSize = 12.sp, color = Color(0xFF58C9A3))
+                                    OutlinedButton(onClick = onLogoutAntigravity, modifier = Modifier.fillMaxWidth()) { Text("Sign out of Google") }
+                                }
+                                AntigravityAuthStatus.STARTING, AntigravityAuthStatus.COMPLETING -> {
+                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                    Text(state.antigravityAuth.message ?: "Starting Google sign-in…", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                AntigravityAuthStatus.AWAITING_CODE -> {
+                                    state.antigravityAuth.authorizationUrl?.let { url ->
+                                        Button(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }, modifier = Modifier.fillMaxWidth()) { Text("Open Google sign-in") }
+                                    }
+                                    OutlinedTextField(value = antigravityCode, onValueChange = { antigravityCode = it }, label = { Text("One-time authorization code") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                                    Button(onClick = { onSubmitAntigravityCode(antigravityCode); antigravityCode = "" }, enabled = antigravityCode.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Complete sign-in") }
+                                }
+                                AntigravityAuthStatus.SIGNED_OUT, AntigravityAuthStatus.ERROR -> {
+                                    state.antigravityAuth.message?.let { Text(it, fontSize = 12.sp, color = if (state.antigravityAuth.status == AntigravityAuthStatus.ERROR) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant) }
+                                    Button(onClick = onBeginAntigravityLogin, modifier = Modifier.fillMaxWidth()) { Text("Sign in with Google") }
+                                }
+                            }
                         }
                         if (index != AgentKind.entries.lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                     }

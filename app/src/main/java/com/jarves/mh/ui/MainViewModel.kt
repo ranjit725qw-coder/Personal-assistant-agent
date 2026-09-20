@@ -36,6 +36,10 @@ import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.network.ProviderApiClient
 import com.jarves.mh.runtime.ClaudeRuntimeBridge
 import com.jarves.mh.runtime.DshRuntimeBridge
+import com.jarves.mh.runtime.AntigravityRuntimeBridge
+import com.jarves.mh.runtime.AntigravityAuthController
+import com.jarves.mh.runtime.AntigravityAuthState
+import com.jarves.mh.runtime.AntigravityAuthStatus
 import com.jarves.mh.runtime.RuntimeBridge
 import com.jarves.mh.runtime.NativeSpawnProcess
 import com.jarves.mh.runtime.RuntimeInstallProgress
@@ -52,6 +56,7 @@ import java.io.RandomAccessFile
 import java.net.UnknownHostException
 import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.Dispatchers
@@ -115,6 +120,7 @@ data class AppUiState(
     val agentInstalling: AgentKind? = null,
     val agentInstallMessage: String? = null,
     val agentInstallProgress: Float = 0f,
+    val antigravityAuth: AntigravityAuthState = AntigravityAuthState(),
     val provider: ProviderProfile = ProviderProfile(ProviderKind.ANTHROPIC),
     val themeMode: com.jarves.mh.ui.theme.AppThemeMode = com.jarves.mh.ui.theme.AppThemeMode.DARK,
     val apiPingStatus: ApiPingStatus = ApiPingStatus.IDLE,
@@ -187,13 +193,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val dshRuntime = DshRuntimeBridge(application) { profile ->
         exhaustedKeys.snapshot(profile.kind.name, ApiKeyPool.parse(vault.get(profile.kind.name))).available.firstOrNull()
     }
+    private val antigravityConversations = ConcurrentHashMap<String, String>()
+    private val antigravityRuntime = AntigravityRuntimeBridge(
+        application,
+        model = { "" },
+        effort = { "medium" },
+        conversationId = { antigravityConversations[it] },
+        saveConversationId = { projectId, conversationId -> antigravityConversations[projectId] = conversationId },
+    )
+    private val antigravityAuthController = AntigravityAuthController(
+        application,
+        initiallySignedIn = File(application.filesDir, "runtime/ubuntu/root/.gemini/antigravity-cli/antigravity-oauth-token").isFile,
+        initialAccountEmail = "",
+        onSignedInChanged = { _, _ -> },
+    )
     private fun activeRuntime(): RuntimeBridge = when (_state.value.selectedAgent) {
         AgentKind.DEEPSEEK_HARNESS -> dshRuntime
-        AgentKind.CLAUDE_CODE, AgentKind.ANTIGRAVITY -> claudeRuntime
+        AgentKind.ANTIGRAVITY -> antigravityRuntime
+        AgentKind.CLAUDE_CODE -> claudeRuntime
     }
     private fun configureProjectRoot(projectId: String, rootPath: String) {
         claudeRuntime.configureProjectRoot(projectId, rootPath)
         dshRuntime.configureProjectRoot(projectId, rootPath)
+        antigravityRuntime.configureProjectRoot(projectId, rootPath)
     }
     private val installer = RuntimeInstaller(application)
     private val providerApi = ProviderApiClient()
@@ -807,31 +829,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(toastMessage = "Stop running work before switching coding agents.") }
             return
         }
-        if (agent == AgentKind.ANTIGRAVITY) {
-            _state.update { it.copy(toastMessage = "Antigravity requires Google sign-in and is not available yet.") }
-            return
+        val alreadyInstalled = when (agent) {
+            AgentKind.CLAUDE_CODE -> true
+            AgentKind.DEEPSEEK_HARNESS -> installer.isDeepSeekHarnessInstalled()
+            AgentKind.ANTIGRAVITY -> installer.isAntigravityInstalled()
         }
-        if (agent == AgentKind.CLAUDE_CODE || installer.isDeepSeekHarnessInstalled()) {
+        if (alreadyInstalled) {
             preferences.selectedAgentKind = agent.name
-            _state.update { it.copy(selectedAgent = agent, installedAgents = it.installedAgents + agent, toastMessage = "${agent.title} is active.") }
+            _state.update { it.copy(selectedAgent = agent, installedAgents = it.installedAgents + agent, toastMessage = if (agent == AgentKind.ANTIGRAVITY && it.antigravityAuth.status != AntigravityAuthStatus.SIGNED_IN) "Antigravity selected. Sign in with Google below." else "${agent.title} is active.") }
             return
         }
         _state.update { it.copy(agentInstalling = agent, agentInstallMessage = "Preparing ${agent.title}…", agentInstallProgress = 0f) }
         viewModelScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    installer.ensureDeepSeekHarnessInstalled { progress ->
+                    val callback: suspend (RuntimeInstallProgress) -> Unit = { progress ->
                         _state.update { current -> current.copy(agentInstallMessage = progress.message, agentInstallProgress = progress.fraction.coerceIn(0f, 1f)) }
+                    }
+                    when (agent) {
+                        AgentKind.DEEPSEEK_HARNESS -> installer.ensureDeepSeekHarnessInstalled(callback)
+                        AgentKind.ANTIGRAVITY -> installer.ensureAntigravityInstalled(callback)
+                        AgentKind.CLAUDE_CODE -> Unit
                     }
                 }
             }
             if (result.isSuccess) {
                 preferences.selectedAgentKind = agent.name
-                _state.update { it.copy(selectedAgent = agent, installedAgents = it.installedAgents + agent, agentInstalling = null, agentInstallMessage = "DeepSeek Harness is ready", agentInstallProgress = 1f, toastMessage = "DeepSeek Harness installed and activated.") }
+                _state.update { it.copy(selectedAgent = agent, installedAgents = it.installedAgents + agent, agentInstalling = null, agentInstallMessage = "${agent.title} is ready", agentInstallProgress = 1f, toastMessage = if (agent == AgentKind.ANTIGRAVITY) "Antigravity installed. Sign in with Google below." else "${agent.title} installed and activated.") }
             } else {
-                _state.update { it.copy(agentInstalling = null, agentInstallProgress = 0f, agentInstallMessage = result.exceptionOrNull()?.message?.take(240), toastMessage = result.exceptionOrNull()?.message ?: "DeepSeek Harness installation failed") }
+                _state.update { it.copy(agentInstalling = null, agentInstallProgress = 0f, agentInstallMessage = result.exceptionOrNull()?.message?.take(240), toastMessage = result.exceptionOrNull()?.message ?: "${agent.title} installation failed") }
             }
         }
+    }
+
+    fun beginAntigravityLogin() {
+        viewModelScope.launch { antigravityAuthController.beginLogin() }
+    }
+
+    fun submitAntigravityCode(code: String) {
+        runCatching { antigravityAuthController.submitCode(code) }
+            .onFailure { error -> _state.update { it.copy(toastMessage = error.message ?: "Could not submit Google code") } }
+    }
+
+    fun logoutAntigravity() {
+        viewModelScope.launch { runCatching { antigravityAuthController.logout() } }
     }
 
     fun getSavedApiKey(kind: ProviderKind): String = vault.get(kind.name).orEmpty()
@@ -840,6 +881,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { RuntimeSetupController.snapshot.collect(::onSetupSnapshot) }
         viewModelScope.launch { claudeRuntime.events.collect(::onRuntimeEvent) }
         viewModelScope.launch { dshRuntime.events.collect(::onRuntimeEvent) }
+        viewModelScope.launch { antigravityRuntime.events.collect(::onRuntimeEvent) }
+        viewModelScope.launch { antigravityAuthController.state.collect { auth -> _state.update { it.copy(antigravityAuth = auth) } } }
         viewModelScope.launch { bootstrap() }
     }
 
@@ -861,6 +904,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val agents = buildSet {
                 add(AgentKind.CLAUDE_CODE)
                 if (installed && installer.isDeepSeekHarnessInstalled()) add(AgentKind.DEEPSEEK_HARNESS)
+                if (installed && installer.isAntigravityInstalled()) add(AgentKind.ANTIGRAVITY)
             }
             val selected = if (current.selectedAgent in agents) current.selectedAgent else AgentKind.CLAUDE_CODE
             if (selected != current.selectedAgent) preferences.selectedAgentKind = selected.name
