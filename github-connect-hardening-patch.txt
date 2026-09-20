@@ -1,2 +1,0 @@
-GitHub Connect hardening applied
-PATCH=success
