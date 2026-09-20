@@ -62,6 +62,7 @@ class RuntimeInstaller(private val context: Context) {
     private val systemUpgradeMarker = File(rootfs, ".pocket-system-upgrade-version")
     private val devStacksFile = File(rootfs, ".pocket-dev-stacks.json")
     private val dshMarker = File(rootfs, ".pocket-dsh-version")
+    private val agyMarker = File(rootfs, ".pocket-agy-version")
     private val dshAndroidCompatibilityMarker = File(rootfs, ".pocket-dsh-android-compat-version")
     private val macosMetadataRepairMarker = File(rootfs, ".pocket-macos-metadata-repair")
 
@@ -277,6 +278,49 @@ class RuntimeInstaller(private val context: Context) {
         verifyGuest(runtime.proot, "/usr/local/bin/dsh --profile headless --help", "DeepSeek Harness verification failed")
         check(isDeepSeekHarnessInstalled()) { "DeepSeek Harness installation is incomplete" }
         onProgress(RuntimeInstallProgress("DeepSeek Harness is ready", 1f, event = RuntimeInstallEvent.COMPLETED))
+    }
+
+    fun isAntigravityInstalled(): Boolean = isInstalled() &&
+        File(rootfs, AGY_GUEST_PATH.removePrefix("/")).canExecute() &&
+        agyMarker.readTextOrNull() == AGY_VERSION
+
+    suspend fun ensureAntigravityInstalled(onProgress: suspend (RuntimeInstallProgress) -> Unit) {
+        if (isAntigravityInstalled()) {
+            onProgress(RuntimeInstallProgress("Antigravity CLI is ready", 1f))
+            return
+        }
+        val runtime = installedRuntime()
+        downloads.mkdirs()
+        val archive = File(downloads, "antigravity-$AGY_VERSION-linux-arm64.tar.gz")
+        onProgress(RuntimeInstallProgress("Downloading Antigravity CLI $AGY_VERSION", 0.05f))
+        downloadVerified(AGY_RELEASE_URL, archive, AGY_RELEASE_SHA512, algorithm = "SHA-512") { bytes, total ->
+            val ratio = if (total > 0L) bytes.toFloat() / total else 0f
+            onProgress(RuntimeInstallProgress("Downloading Antigravity CLI $AGY_VERSION", 0.05f + ratio * 0.75f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
+        }
+        onProgress(RuntimeInstallProgress("Installing Antigravity CLI $AGY_VERSION", 0.85f, indeterminate = true))
+        val destination = File(rootfs, AGY_GUEST_PATH.removePrefix("/"))
+        destination.parentFile?.mkdirs()
+        var found = false
+        TarArchiveInputStream(GzipCompressorInputStream(BufferedInputStream(archive.inputStream()))).use { tar ->
+            var entry = tar.nextEntry
+            while (entry != null) {
+                if (entry.isFile && entry.name.removePrefix("./") == "antigravity") {
+                    val staged = File(destination.parentFile, ".agy-$AGY_VERSION.installing")
+                    FileOutputStream(staged).use { tar.copyTo(it) }
+                    Os.chmod(staged.absolutePath, 0b111101101)
+                    Os.rename(staged.absolutePath, destination.absolutePath)
+                    found = true
+                    break
+                }
+                entry = tar.nextEntry
+            }
+        }
+        archive.delete()
+        check(found) { "Official Antigravity archive did not contain the expected binary" }
+        verifyGuest(runtime.proot, "$AGY_GUEST_PATH --version", "Antigravity CLI verification failed")
+        agyMarker.writeText(AGY_VERSION)
+        check(isAntigravityInstalled()) { "Antigravity CLI installation is incomplete" }
+        onProgress(RuntimeInstallProgress("Antigravity CLI is ready", 1f, event = RuntimeInstallEvent.COMPLETED))
     }
 
     fun ensureDshAndroidCompatibility() {
@@ -974,6 +1018,10 @@ class RuntimeInstaller(private val context: Context) {
         guestCommand: List<String>,
         guestWorkspacePath: String = "/workspace",
         emulateHardLinks: Boolean = true,
+        outputFile: File = File(context.cacheDir, "runtime-output-${System.nanoTime()}.log"),
+        pseudoTerminal: Boolean = false,
+        ptyRows: Int = 40,
+        ptyColumns: Int = 120,
     ): Process {
         require(
             guestWorkspacePath == "/workspace" ||
@@ -1043,7 +1091,10 @@ class RuntimeInstaller(private val context: Context) {
                 putAll(environment)
             },
             cwd = context.filesDir.absolutePath,
-            outputFile = File(context.cacheDir, "runtime-output-${System.nanoTime()}.log"),
+            outputFile = outputFile,
+            pseudoTerminal = pseudoTerminal,
+            ptyRows = ptyRows,
+            ptyColumns = ptyColumns,
         )
     }
 
@@ -1346,6 +1397,10 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
     private fun File.readTextOrNull(): String? = runCatching { readText().trim() }.getOrNull()
 
     companion object {
+        const val AGY_GUEST_PATH = "/root/.local/bin/agy"
+        private const val AGY_VERSION = "1.1.27"
+        private const val AGY_RELEASE_URL = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.27-5211191891591168/linux-arm/cli_linux_arm64.tar.gz"
+        private const val AGY_RELEASE_SHA512 = "ed45f6930785aa4b42f14e07ace1c9d91a94fb76e760f54acbd7d3d3951e1f957fd456a0dae2a3124dd9a3b689bf7afb7c9303a3e4ba95037fc10063424d9bf9"
         private const val LEGACY_README = "# Pocket Dev project\n\nThis project is managed locally on Android.\n"
         private const val LEGACY_INDEX = "<!doctype html><title>Pocket Dev</title><h1>Hello from Android</h1>\n"
         private const val ROOTFS_VERSION = "ubuntu-20.04.5-arm64"
