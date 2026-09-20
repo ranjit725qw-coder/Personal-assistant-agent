@@ -135,6 +135,8 @@ data class AppUiState(
     val antigravityEffort: String = "high",
     val antigravityModels: List<String> = emptyList(),
     val antigravityModelsLoading: Boolean = false,
+    val antigravityModelTestStatus: ApiPingStatus = ApiPingStatus.IDLE,
+    val antigravityModelTestMessage: String? = null,
     val provider: ProviderProfile = ProviderProfile(ProviderKind.ANTHROPIC),
     val themeMode: com.jarves.mh.ui.theme.AppThemeMode = com.jarves.mh.ui.theme.AppThemeMode.DARK,
     val apiPingStatus: ApiPingStatus = ApiPingStatus.IDLE,
@@ -900,6 +902,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 antigravityModel = model,
                 antigravityEffort = modelEffort ?: it.antigravityEffort,
+                antigravityModelTestStatus = ApiPingStatus.IDLE,
+                antigravityModelTestMessage = null,
                 toastMessage = "Google AI model selected: $model",
             )
         }
@@ -923,6 +927,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 antigravityEffort = effort,
                 antigravityModel = matchingModel ?: it.antigravityModel,
+                antigravityModelTestStatus = ApiPingStatus.IDLE,
+                antigravityModelTestMessage = null,
             )
         }
     }
@@ -983,6 +989,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         onFailure = { error -> state.copy(
                             antigravityModelsLoading = false,
                             toastMessage = error.message ?: "Could not load Google AI models",
+                        ) },
+                    )
+                }
+            }
+        }
+    }
+
+    fun testAntigravityModel() {
+        val current = _state.value
+        if (current.antigravityModelTestStatus == ApiPingStatus.PINGING) return
+        if (current.antigravityAuth.status != AntigravityAuthStatus.SIGNED_IN) {
+            _state.update { it.copy(
+                antigravityModelTestStatus = ApiPingStatus.FAILED,
+                antigravityModelTestMessage = "Connect Google before testing a model",
+            ) }
+            return
+        }
+        val selectedModel = current.antigravityModel
+        if (selectedModel.isBlank()) {
+            _state.update { it.copy(
+                antigravityModelTestStatus = ApiPingStatus.FAILED,
+                antigravityModelTestMessage = "Select a Google AI model first",
+            ) }
+            return
+        }
+        _state.update { it.copy(
+            antigravityModelTestStatus = ApiPingStatus.PINGING,
+            antigravityModelTestMessage = "Testing $selectedModel with Antigravity…",
+        ) }
+        viewModelScope.launch {
+            val result = runCatching { antigravityRuntime.hello() }
+            _state.update { state ->
+                if (state.antigravityModel != selectedModel) {
+                    state.copy(
+                        antigravityModelTestStatus = ApiPingStatus.IDLE,
+                        antigravityModelTestMessage = "Model changed. Test the newly selected model.",
+                    )
+                } else {
+                    result.fold(
+                        onSuccess = { reply -> state.copy(
+                            antigravityModelTestStatus = ApiPingStatus.OK,
+                            antigravityModelTestMessage = "$selectedModel responded: ${reply.trim().take(120)}",
+                        ) },
+                        onFailure = { error -> state.copy(
+                            antigravityModelTestStatus = ApiPingStatus.FAILED,
+                            antigravityModelTestMessage = error.message?.take(240) ?: "The selected model did not respond",
                         ) },
                     )
                 }
