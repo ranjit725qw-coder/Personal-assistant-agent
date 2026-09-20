@@ -15,6 +15,10 @@ import com.jarves.mh.data.ApiKeyPool
 import com.jarves.mh.data.ApiKeyVault
 import com.jarves.mh.data.ExhaustedKeyStore
 import com.jarves.mh.data.AppPreferences
+import com.jarves.mh.data.AiUsageStore
+import com.jarves.mh.data.AiUsageStatus
+import com.jarves.mh.data.AiUsageSummary
+import com.jarves.mh.data.ApiKeyHealth
 import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.ActivityItem
 import com.jarves.mh.model.ChangeItem
@@ -141,6 +145,8 @@ data class AppUiState(
     val themeMode: com.jarves.mh.ui.theme.AppThemeMode = com.jarves.mh.ui.theme.AppThemeMode.DARK,
     val apiPingStatus: ApiPingStatus = ApiPingStatus.IDLE,
     val apiPingMessage: String? = null,
+    val aiUsage: AiUsageSummary = AiUsageSummary(),
+    val apiKeyHealth: List<ApiKeyHealth> = emptyList(),
     val projects: List<Project> = emptyList(),
     val activeProject: Project? = null,
     val projectChats: List<ProjectChat> = emptyList(),
@@ -201,10 +207,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val vault = ApiKeyVault(application)
     private val preferences = AppPreferences(application)
     private val exhaustedKeys = ExhaustedKeyStore(application)
+    private val usageStore = AiUsageStore(application)
+    @Volatile private var activeUsageId: String? = null
     private val claudeRuntime = ClaudeRuntimeBridge(
         application,
         poolFor = { profile -> exhaustedKeys.snapshot(profile.kind.name, ApiKeyPool.parse(vault.get(profile.kind.name))) },
-        onKeyExhausted = { profile, key -> exhaustedKeys.markExhausted(profile.kind.name, key) },
+        onKeyExhausted = { profile, key -> exhaustedKeys.markExhausted(profile.kind.name, key); refreshUsageState() },
     )
     private val dshRuntime = DshRuntimeBridge(application) { profile ->
         exhaustedKeys.snapshot(profile.kind.name, ApiKeyPool.parse(vault.get(profile.kind.name))).available.firstOrNull()
@@ -264,6 +272,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     init {
+        refreshUsageState()
         RuntimeSetupController.restore(application)
         if (!preferences.legacySeededCredentialRemoved) {
             vault.remove(ProviderKind.CUSTOM.name)
@@ -1428,6 +1437,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.saveProvider(saved)
         preferences.onboardingComplete = true
         _state.update { it.copy(onboardingComplete = true, provider = saved, startupStage = StartupStage.READY) }
+        refreshUsageState()
         pingApi()
     }
 
@@ -2098,11 +2108,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return clean.ifBlank { "attachment-${UUID.randomUUID().toString().take(8)}" }
     }
 
+    private fun refreshUsageState() {
+        val profile = _state.value.provider
+        val keys = ApiKeyPool.parse(vault.get(profile.kind.name))
+        val available = keys.indices.filterNot { exhaustedKeys.isExhausted(profile.kind.name, keys[it]) }
+        val current = available.firstOrNull()
+        val health = keys.mapIndexed { index, key ->
+            val exhausted = exhaustedKeys.isExhausted(profile.kind.name, key)
+            ApiKeyHealth(index + 1, key.takeLast(4), when { exhausted -> "Exhausted today"; index == current -> "Active / next"; else -> "Ready" }, index == current)
+        }
+        _state.update { it.copy(aiUsage = usageStore.snapshot(), apiKeyHealth = health) }
+    }
+
     fun sendPrompt(prompt: String) {
         val project = state.value.activeProject ?: return
         val attachments = state.value.pendingAttachments
         if ((prompt.isBlank() && attachments.isEmpty()) || state.value.isRunning) return
         val requestText = prompt.trim().ifBlank { "Please review the attached files." }
+        val u = state.value
+        val provider = if (u.selectedAgent == AgentKind.ANTIGRAVITY) "Google Antigravity" else u.provider.kind.title
+        val model = if (u.selectedAgent == AgentKind.ANTIGRAVITY) u.antigravityModel.ifBlank { "Google AI" } else u.provider.model.ifBlank { "Default model" }
+        activeUsageId = usageStore.start(u.selectedAgent, provider, model)
+        refreshUsageState()
         updateActiveChatTitle(requestText)
         _state.update {
             val startedAt = System.currentTimeMillis()
@@ -2467,6 +2494,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     currentTaskRequest = null,
                 )
             }
+        }
+        when (event) {
+            is RuntimeEvent.SessionCompleted -> { usageStore.finish(activeUsageId, AiUsageStatus.SUCCESS); activeUsageId = null; refreshUsageState() }
+            is RuntimeEvent.SessionFailed -> {
+                val limited = event.reason.contains("429") || event.reason.contains("rate limit", true) || event.reason.contains("quota", true) || event.reason.contains("credit", true)
+                usageStore.finish(activeUsageId, if (limited) AiUsageStatus.RATE_LIMITED else AiUsageStatus.FAILED)
+                activeUsageId = null
+                refreshUsageState()
+            }
+            else -> Unit
         }
         if (event is RuntimeEvent.FilesChanged || event is RuntimeEvent.SessionCompleted) {
             _state.value.activeProject?.id?.let { touchProject(it) }
