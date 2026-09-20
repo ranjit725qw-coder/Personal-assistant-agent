@@ -93,6 +93,16 @@ internal fun sanitizeTerminalOutput(text: String): String = text
     .replace(ANSI_TERMINAL_SEQUENCE, "")
     .filter { it == '\n' || it == '\r' || it == '\t' || it.code >= 0x20 }
 
+private val ANTIGRAVITY_MODEL_EFFORT = Regex("^(.*)-(low|medium|high)$")
+
+private fun antigravityEffortFromModel(model: String): String? =
+    ANTIGRAVITY_MODEL_EFFORT.matchEntire(model)?.groupValues?.get(2)
+
+private fun antigravityModelWithEffort(model: String, effort: String): String? {
+    val match = ANTIGRAVITY_MODEL_EFFORT.matchEntire(model) ?: return null
+    return "${match.groupValues[1]}-$effort"
+}
+
 private data class ProjectTerminalSnapshot(
     val lines: List<TerminalOutputLine> = emptyList(),
     val cwd: String = "/workspace",
@@ -121,6 +131,10 @@ data class AppUiState(
     val agentInstallMessage: String? = null,
     val agentInstallProgress: Float = 0f,
     val antigravityAuth: AntigravityAuthState = AntigravityAuthState(),
+    val antigravityModel: String = "",
+    val antigravityEffort: String = "high",
+    val antigravityModels: List<String> = emptyList(),
+    val antigravityModelsLoading: Boolean = false,
     val provider: ProviderProfile = ProviderProfile(ProviderKind.ANTHROPIC),
     val themeMode: com.jarves.mh.ui.theme.AppThemeMode = com.jarves.mh.ui.theme.AppThemeMode.DARK,
     val apiPingStatus: ApiPingStatus = ApiPingStatus.IDLE,
@@ -196,8 +210,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val antigravityConversations = ConcurrentHashMap<String, String>()
     private val antigravityRuntime = AntigravityRuntimeBridge(
         application,
-        model = { "" },
-        effort = { "medium" },
+        model = { _state.value.antigravityModel },
+        effort = { _state.value.antigravityEffort },
         conversationId = { antigravityConversations[it] },
         saveConversationId = { projectId, conversationId -> antigravityConversations[projectId] = conversationId },
     )
@@ -235,6 +249,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             backgroundSetupComplete = preferences.backgroundSetupComplete,
             selectedAgent = runCatching { AgentKind.valueOf(preferences.selectedAgentKind) }
                 .getOrDefault(AgentKind.CLAUDE_CODE),
+            antigravityModel = preferences.antigravityModel,
+            antigravityEffort = preferences.antigravityEffort,
             provider = preferences.loadProvider(vault),
             themeMode = runCatching { com.jarves.mh.ui.theme.AppThemeMode.valueOf(preferences.themeMode.uppercase()) }
                 .getOrDefault(com.jarves.mh.ui.theme.AppThemeMode.DARK),
@@ -875,6 +891,105 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { runCatching { antigravityAuthController.logout() } }
     }
 
+    fun setAntigravityModel(model: String) {
+        if (model.isBlank()) return
+        preferences.antigravityModel = model
+        val modelEffort = antigravityEffortFromModel(model)
+        if (modelEffort != null) preferences.antigravityEffort = modelEffort
+        _state.update {
+            it.copy(
+                antigravityModel = model,
+                antigravityEffort = modelEffort ?: it.antigravityEffort,
+                toastMessage = "Google AI model selected: $model",
+            )
+        }
+    }
+
+    fun setAntigravityEffort(effort: String) {
+        if (effort !in setOf("low", "medium", "high")) return
+        val current = _state.value
+        val matchingModel = antigravityModelWithEffort(current.antigravityModel, effort)
+            ?.takeIf { candidate -> current.antigravityModels.isEmpty() || candidate in current.antigravityModels }
+        if (current.antigravityModel.isNotBlank() &&
+            antigravityEffortFromModel(current.antigravityModel) != null &&
+            matchingModel == null
+        ) {
+            _state.update { it.copy(toastMessage = "This Google model does not offer ${effort.replaceFirstChar(Char::uppercase)} reasoning") }
+            return
+        }
+        preferences.antigravityEffort = effort
+        matchingModel?.let { preferences.antigravityModel = it }
+        _state.update {
+            it.copy(
+                antigravityEffort = effort,
+                antigravityModel = matchingModel ?: it.antigravityModel,
+            )
+        }
+    }
+
+    fun refreshAntigravityModels() {
+        val current = _state.value
+        if (current.antigravityModelsLoading || !installer.isAntigravityInstalled()) return
+        if (current.antigravityAuth.status != AntigravityAuthStatus.SIGNED_IN) {
+            _state.update { it.copy(toastMessage = "Connect Google before loading Antigravity models") }
+            return
+        }
+        _state.update { it.copy(antigravityModelsLoading = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val runtime = installer.installedRuntime()
+                val workspace = File(getApplication<Application>().filesDir, "workspaces/antigravity-models").apply { mkdirs() }
+                val process = installer.process(
+                    runtime.proot,
+                    runtime.rootfs,
+                    workspace,
+                    emptyMap(),
+                    listOf(RuntimeInstaller.AGY_GUEST_PATH, "models"),
+                    guestWorkspacePath = "/workspace/antigravity-models",
+                    emulateHardLinks = false,
+                )
+                while (process.isAlive) delay(50)
+                check(process.waitFor() == 0) { "Could not list Google AI models" }
+                val output = (process as? NativeSpawnProcess)?.outputFile?.readText().orEmpty()
+                output.lineSequence()
+                    .map { sanitizeTerminalOutput(it).trim() }
+                    .mapNotNull { line -> line.split(Regex("\\s+"), limit = 2).firstOrNull() }
+                    .filter { it.matches(Regex("[a-z0-9][a-z0-9._-]+")) }
+                    .filter { it.startsWith("gemini-") || it.contains("google", ignoreCase = true) }
+                    .distinct()
+                    .toList()
+                    .also { check(it.isNotEmpty()) { "Antigravity returned no Google AI models" } }
+            }
+            withContext(Dispatchers.Main) {
+                _state.update { state ->
+                    result.fold(
+                        onSuccess = { models ->
+                            val preferred = antigravityModelWithEffort(state.antigravityModel, state.antigravityEffort)
+                                ?.takeIf(models::contains)
+                            val selected = preferred
+                                ?: state.antigravityModel.takeIf(models::contains)
+                                ?: models.first()
+                            val selectedEffort = antigravityEffortFromModel(selected) ?: state.antigravityEffort
+                            preferences.antigravityModel = selected
+                            preferences.antigravityEffort = selectedEffort
+                            state.copy(
+                                antigravityModelsLoading = false,
+                                antigravityModels = models,
+                                antigravityModel = selected,
+                                antigravityEffort = selectedEffort,
+                                toastMessage = "${models.size} Google AI models available",
+                            )
+                        },
+                        onFailure = { error -> state.copy(
+                            antigravityModelsLoading = false,
+                            toastMessage = error.message ?: "Could not load Google AI models",
+                        ) },
+                    )
+                }
+            }
+        }
+    }
+
     fun getSavedApiKey(kind: ProviderKind): String = vault.get(kind.name).orEmpty()
 
     init {
@@ -882,7 +997,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { claudeRuntime.events.collect(::onRuntimeEvent) }
         viewModelScope.launch { dshRuntime.events.collect(::onRuntimeEvent) }
         viewModelScope.launch { antigravityRuntime.events.collect(::onRuntimeEvent) }
-        viewModelScope.launch { antigravityAuthController.state.collect { auth -> _state.update { it.copy(antigravityAuth = auth) } } }
+        viewModelScope.launch {
+            antigravityAuthController.state.collect { auth ->
+                _state.update { it.copy(antigravityAuth = auth) }
+                if (auth.status == AntigravityAuthStatus.SIGNED_IN && _state.value.antigravityModels.isEmpty()) {
+                    refreshAntigravityModels()
+                }
+            }
+        }
         viewModelScope.launch { bootstrap() }
     }
 

@@ -111,6 +111,9 @@ fun SettingsScreen(
     onBeginAntigravityLogin: () -> Unit,
     onSubmitAntigravityCode: (String) -> Unit,
     onLogoutAntigravity: () -> Unit,
+    onRefreshAntigravityModels: () -> Unit,
+    onSetAntigravityModel: (String) -> Unit,
+    onSetAntigravityEffort: (String) -> Unit,
     onSetThemeMode: (AppThemeMode) -> Unit,
     onPing: () -> Unit,
     onClearTerminal: () -> Unit,
@@ -139,6 +142,7 @@ fun SettingsScreen(
     var statusOk by remember { mutableStateOf(false) }
     var terminalCleared by remember { mutableStateOf(false) }
     var antigravityCode by rememberSaveable { mutableStateOf("") }
+    var showAntigravityModels by rememberSaveable { mutableStateOf(false) }
     var showReliabilityHelp by rememberSaveable { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val filteredModels = remember(models, modelSearch) {
@@ -170,6 +174,52 @@ fun SettingsScreen(
                 }
             }
             isDiscovering = false
+        }
+    }
+
+    if (showAntigravityModels) {
+        ModalBottomSheet(
+            onDismissRequest = { showAntigravityModels = false },
+            sheetState = sheetState,
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(Modifier.fillMaxWidth().fillMaxHeight(0.72f).padding(horizontal = 20.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Google AI models", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text("Provided by your connected Antigravity account", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = onRefreshAntigravityModels, enabled = !state.antigravityModelsLoading) {
+                        if (state.antigravityModelsLoading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        else Icon(Icons.Default.Refresh, "Refresh Google models")
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                if (state.antigravityModels.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No models loaded. Tap refresh.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 24.dp)) {
+                        items(state.antigravityModels, key = { it }) { modelId ->
+                            Row(
+                                Modifier.fillMaxWidth().clickable {
+                                    onSetAntigravityModel(modelId)
+                                    showAntigravityModels = false
+                                }.padding(vertical = 14.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(formatAntigravityModelName(modelId), fontWeight = FontWeight.SemiBold)
+                                    Text(modelId, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                SelectionDot(state.antigravityModel == modelId)
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -319,6 +369,44 @@ fun SettingsScreen(
                             when (state.antigravityAuth.status) {
                                 AntigravityAuthStatus.SIGNED_IN -> {
                                     Text(state.antigravityAuth.message ?: "Google account connected", fontSize = 12.sp, color = Color(0xFF58C9A3))
+                                    Text("Google AI model", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    OutlinedButton(
+                                        onClick = {
+                                            if (state.antigravityModels.isEmpty()) onRefreshAntigravityModels()
+                                            showAntigravityModels = true
+                                        },
+                                        enabled = !state.antigravityModelsLoading,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        if (state.antigravityModelsLoading) CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+                                        else Icon(Icons.Default.SmartToy, null, Modifier.size(17.dp))
+                                        Spacer(Modifier.width(7.dp))
+                                        Text(
+                                            if (state.antigravityModel.isBlank()) "Load Google AI models"
+                                            else formatAntigravityModelName(state.antigravityModel),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        listOf("low", "medium", "high").forEach { effort ->
+                                            val selected = state.antigravityEffort == effort
+                                            if (selected) {
+                                                Button(onClick = { onSetAntigravityEffort(effort) }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 4.dp)) {
+                                                    Text(effort.replaceFirstChar(Char::uppercase), fontSize = 11.sp)
+                                                }
+                                            } else {
+                                                OutlinedButton(onClick = { onSetAntigravityEffort(effort) }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 4.dp)) {
+                                                    Text(effort.replaceFirstChar(Char::uppercase), fontSize = 11.sp)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    OutlinedButton(onClick = onRefreshAntigravityModels, enabled = !state.antigravityModelsLoading, modifier = Modifier.fillMaxWidth()) {
+                                        Icon(Icons.Default.Refresh, null, Modifier.size(17.dp))
+                                        Spacer(Modifier.width(7.dp))
+                                        Text("Refresh Google AI models")
+                                    }
                                     OutlinedButton(onClick = onLogoutAntigravity, modifier = Modifier.fillMaxWidth()) { Text("Sign out of Google") }
                                 }
                                 AntigravityAuthStatus.STARTING, AntigravityAuthStatus.COMPLETING -> {
@@ -949,3 +1037,11 @@ private fun DebugUpdateChannelSection(
         }
     }
 }
+
+
+/** Formats Antigravity model identifiers into readable Google AI model names. */
+internal fun formatAntigravityModelName(id: String): String = id
+    .removePrefix("models/")
+    .split('-')
+    .joinToString(" ") { part -> part.replaceFirstChar(Char::uppercase) }
+    .replace("Gemini", "Gemini")
