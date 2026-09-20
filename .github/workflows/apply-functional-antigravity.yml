@@ -3,7 +3,7 @@ on:
   push:
     branches: [sync/functional-antigravity-runtime]
     paths:
-      - scripts/fix_functional_antigravity.py
+      - scripts/fix_antigravity_selection.py
       - .github/workflows/apply-functional-antigravity.yml
 permissions:
   contents: write
@@ -19,21 +19,18 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: gradle
-      - name: Import PTY support, adapt, compile, and record
+      - name: Fix selection, compile, and record
         shell: bash
         run: |
           set +e
-          base=https://raw.githubusercontent.com/techjarves/Mobile-Harness/15177fcb12bbd2afc8e281a79fb8185bb5daa5b8/app/src/main
-          curl -fsSL "$base/java/com/jarves/mh/runtime/NativeSpawnProcess.kt" -o app/src/main/java/com/jarves/mh/runtime/NativeSpawnProcess.kt
+          python3 scripts/fix_antigravity_selection.py
           status=$?
-          if [ "$status" -eq 0 ]; then curl -fsSL "$base/cpp/pocket_spawn.c" -o app/src/main/cpp/pocket_spawn.c; status=$?; fi
-          if [ "$status" -eq 0 ]; then python3 scripts/fix_functional_antigravity.py; status=$?; fi
           if [ "$status" -eq 0 ]; then chmod +x gradlew; ./gradlew compileOnlineReleaseKotlin --stacktrace > /tmp/antigravity.log 2>&1; status=$?; fi
           tail -n 1000 /tmp/antigravity.log 2>/dev/null > diagnostics/functional-antigravity-validation.txt || true
           printf '%s\n' "$status" > diagnostics/functional-antigravity-status.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -f app/src/main/java app/src/main/cpp diagnostics
-          git commit -m 'Add PTY support for Antigravity OAuth and record validation' || true
+          git add -f app/src/main/java diagnostics
+          git commit -m 'Fix Antigravity model selection and record validation' || true
           git push
           exit "$status"
