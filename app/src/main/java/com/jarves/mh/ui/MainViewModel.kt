@@ -63,7 +63,10 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -74,6 +77,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -151,6 +155,7 @@ data class AppUiState(
     val githubUserCode: String? = null,
     val githubVerificationUri: String? = null,
     val githubMessage: String? = null,
+    val githubCanCancel: Boolean = false,
     val aiUsage: AiUsageSummary = AiUsageSummary(),
     val apiKeyHealth: List<ApiKeyHealth> = emptyList(),
     val projects: List<Project> = emptyList(),
@@ -256,6 +261,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     @Volatile private var projectTerminalProcess: Process? = null
     @Volatile private var terminalProcess: Process? = null
+    @Volatile private var githubAuthProcess: Process? = null
+    @Volatile private var githubAuthCancelledByUser: Boolean = false
+    private var githubAuthJob: Job? = null
     @Volatile private var projectTerminalProjectId: String? = null
     @Volatile private var projectTerminalStopRequested: Boolean = false
     @Volatile private var setupCompletionHandled: Boolean = false
@@ -1066,7 +1074,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runtime.proot,
             runtime.rootfs,
             workspace,
-            mapOf("GH_CONFIG_DIR" to "/root/.config/gh"),
+            mapOf("GH_CONFIG_DIR" to GITHUB_CONFIG_DIR),
             listOf("/usr/bin/bash", "-lc", command),
             guestWorkspacePath = "/workspace/github-auth",
             emulateHardLinks = false,
@@ -1078,88 +1086,264 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val exit = process.waitFor()
         val output = (process as? NativeSpawnProcess)?.outputFile?.let(::readProcessOutput).orEmpty()
-        return exit to sanitizeTerminalOutput(output).trim()
+        return exit to redactGitHubSensitiveOutput(sanitizeTerminalOutput(output)).trim()
     }
 
     private fun readProcessOutput(file: File): String = runCatching { file.readText() }.getOrDefault("")
 
+    private fun stopGitHubAuthProcess(process: Process?) {
+        if (process == null) return
+        runCatching { process.outputStream.close() }
+        if (process.isAlive) runCatching { process.destroy() }
+        repeat(5) {
+            if (!process.isAlive) return
+            Thread.sleep(40)
+        }
+        if (process.isAlive) runCatching { process.destroyForcibly() }
+    }
+
+    private fun hardenGitHubCredentialStorage() {
+        val (exit, output) = runGitHubCommand(
+            "umask 077; mkdir -p /root/.config/gh; chmod 700 /root/.config/gh; " +
+                "find /root/.config/gh -type d -exec chmod 700 {} +; " +
+                "find /root/.config/gh -type f -exec chmod 600 {} +",
+        )
+        check(exit == 0) { output.ifBlank { "Could not secure GitHub credential files" } }
+    }
+
     private suspend fun refreshGitHubConnection() = withContext(Dispatchers.IO) {
         if (!installer.isInstalled() || !installer.isGitHubCliInstalled()) return@withContext
-        val (exit, login) = runGitHubCommand("gh api user --jq .login")
-        if (exit == 0 && login.lineSequence().lastOrNull().orEmpty().isNotBlank()) {
-            val account = login.lineSequence().last().trim()
-            preferences.githubLogin = account
-            _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.CONNECTED, githubLogin = account, githubMessage = "Connected as @$account") }
-        } else {
-            preferences.githubLogin = ""
-            _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.DISCONNECTED, githubLogin = null) }
+        val savedLogin = preferences.githubLogin.takeIf(String::isNotBlank)
+        try {
+            val (exit, output) = runGitHubCommand("gh api user --jq .login")
+            if (exit == 0 && output.lineSequence().lastOrNull().orEmpty().isNotBlank()) {
+                val account = output.lineSequence().last().trim()
+                preferences.githubLogin = account
+                _state.update {
+                    it.copy(
+                        githubAuthStatus = GitHubAuthStatus.CONNECTED,
+                        githubLogin = account,
+                        githubMessage = "Connected as @$account",
+                        githubCanCancel = false,
+                    )
+                }
+                return@withContext
+            }
+            when (classifyGitHubProbeFailure(output)) {
+                GitHubProbeFailure.UNAUTHORIZED -> {
+                    preferences.githubLogin = ""
+                    _state.update {
+                        it.copy(
+                            githubAuthStatus = GitHubAuthStatus.DISCONNECTED,
+                            githubLogin = null,
+                            githubMessage = "GitHub authorization expired. Connect again.",
+                            githubCanCancel = false,
+                        )
+                    }
+                }
+                GitHubProbeFailure.OFFLINE -> _state.update {
+                    it.copy(
+                        githubAuthStatus = if (savedLogin == null) GitHubAuthStatus.ERROR else GitHubAuthStatus.CONNECTED,
+                        githubLogin = savedLogin,
+                        githubMessage = if (savedLogin == null) "GitHub could not be reached. Check your connection and retry."
+                            else "Offline: saved connection for @$savedLogin was kept. Verification will retry later.",
+                        githubCanCancel = false,
+                    )
+                }
+                GitHubProbeFailure.OTHER -> _state.update {
+                    it.copy(
+                        githubAuthStatus = GitHubAuthStatus.ERROR,
+                        githubLogin = savedLogin,
+                        githubMessage = output.takeLast(240).ifBlank { "Could not verify GitHub connection" },
+                        githubCanCancel = false,
+                    )
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            _state.update {
+                it.copy(
+                    githubAuthStatus = GitHubAuthStatus.ERROR,
+                    githubLogin = savedLogin,
+                    githubMessage = "Could not check GitHub connection: ${error.message?.take(160) ?: "runtime error"}",
+                    githubCanCancel = false,
+                )
+            }
         }
+    }
+
+    fun refreshGitHubConnectionNow() {
+        _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.STARTING, githubMessage = "Checking GitHub connection…", githubCanCancel = false) }
+        viewModelScope.launch { refreshGitHubConnection() }
     }
 
     fun connectGitHub() {
-        if (_state.value.githubAuthStatus == GitHubAuthStatus.STARTING || _state.value.githubAuthStatus == GitHubAuthStatus.AWAITING_USER) return
-        _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.STARTING, githubMessage = "Preparing official GitHub CLI…", githubUserCode = null, githubVerificationUri = null) }
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                installer.ensureGitHubCliInstalled { progress -> _state.update { it.copy(githubMessage = progress.message) } }
-                val runtime = installer.installedRuntime()
-                val workspace = File(getApplication<Application>().filesDir, "workspaces/github-auth").apply { mkdirs() }
-                val process = installer.process(
-                    runtime.proot,
-                    runtime.rootfs,
-                    workspace,
-                    mapOf("GH_CONFIG_DIR" to "/root/.config/gh", "BROWSER" to "/bin/true"),
-                    listOf("/usr/bin/bash", "-lc", "gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key"),
-                    guestWorkspacePath = "/workspace/github-auth",
-                    emulateHardLinks = false,
-                )
-                val native = process as? NativeSpawnProcess ?: error("GitHub login process is unavailable")
-                var offset = 0L
-                val output = StringBuilder()
-                var continued = false
-                while (process.isAlive || native.outputFile.length() > offset) {
-                    val available = native.outputFile.length() - offset
-                    if (available <= 0L) { delay(80); continue }
-                    val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
-                    val count = RandomAccessFile(native.outputFile, "r").use { f -> f.seek(offset); f.read(bytes) }
-                    if (count <= 0) continue
-                    offset += count
-                    output.append(bytes.decodeToString(0, count))
-                    val clean = sanitizeTerminalOutput(output.toString())
-                    val code = Regex("\\b[A-Z0-9]{4}-[A-Z0-9]{4}\\b").find(clean)?.value
-                    if (code != null) {
-                        _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.AWAITING_USER, githubUserCode = code, githubVerificationUri = "https://github.com/login/device", githubMessage = "Enter this one-time code on GitHub") }
-                        if (!continued) {
-                            process.outputStream.write("\n".toByteArray())
-                            process.outputStream.flush()
-                            continued = true
+        if (githubAuthJob?.isActive == true) return
+        githubAuthCancelledByUser = false
+        _state.update {
+            it.copy(
+                githubAuthStatus = GitHubAuthStatus.STARTING,
+                githubMessage = "Preparing official GitHub CLI…",
+                githubUserCode = null,
+                githubVerificationUri = null,
+                githubCanCancel = true,
+            )
+        }
+        githubAuthJob = viewModelScope.launch(Dispatchers.IO) {
+            var process: Process? = null
+            try {
+                withTimeout(GITHUB_LOGIN_TIMEOUT_MS) {
+                    installer.ensureGitHubCliInstalled { progress -> _state.update { it.copy(githubMessage = progress.message) } }
+                    val runtime = installer.installedRuntime()
+                    val workspace = File(getApplication<Application>().filesDir, "workspaces/github-auth").apply { mkdirs() }
+                    process = installer.process(
+                        runtime.proot,
+                        runtime.rootfs,
+                        workspace,
+                        mapOf("GH_CONFIG_DIR" to GITHUB_CONFIG_DIR, "BROWSER" to "/bin/true"),
+                        listOf("/usr/bin/bash", "-lc", GITHUB_LOGIN_COMMAND),
+                        guestWorkspacePath = "/workspace/github-auth",
+                        emulateHardLinks = false,
+                    ).also { githubAuthProcess = it }
+                    val native = process as? NativeSpawnProcess ?: error("GitHub login process is unavailable")
+                    var offset = 0L
+                    val output = StringBuilder()
+                    var continued = false
+                    while (process?.isAlive == true || native.outputFile.length() > offset) {
+                        val available = native.outputFile.length() - offset
+                        if (available <= 0L) { delay(80); continue }
+                        val bytes = ByteArray(minOf(available, 16L * 1024).toInt())
+                        val count = RandomAccessFile(native.outputFile, "r").use { file -> file.seek(offset); file.read(bytes) }
+                        if (count <= 0) continue
+                        offset += count
+                        output.append(bytes.decodeToString(0, count))
+                        val clean = redactGitHubSensitiveOutput(sanitizeTerminalOutput(output.toString()))
+                        val code = extractGitHubDeviceCode(clean)
+                        if (code != null) {
+                            _state.update {
+                                it.copy(
+                                    githubAuthStatus = GitHubAuthStatus.AWAITING_USER,
+                                    githubUserCode = code,
+                                    githubVerificationUri = GITHUB_DEVICE_URL,
+                                    githubMessage = "Enter this one-time code on GitHub",
+                                    githubCanCancel = true,
+                                )
+                            }
+                            if (!continued) {
+                                process?.outputStream?.write("\n".toByteArray())
+                                process?.outputStream?.flush()
+                                continued = true
+                            }
                         }
                     }
+                    val exit = process?.waitFor() ?: -1
+                    check(exit == 0) {
+                        redactGitHubSensitiveOutput(sanitizeTerminalOutput(output.toString())).takeLast(500)
+                            .ifBlank { "GitHub sign-in failed" }
+                    }
+                    hardenGitHubCredentialStorage()
+                    val (setupExit, setupOutput) = runGitHubCommand("gh auth setup-git")
+                    check(setupExit == 0) {
+                        setupOutput.takeLast(300).ifBlank { "Git credential setup failed. Retry GitHub connection." }
+                    }
+                    refreshGitHubConnection()
+                    check(_state.value.githubAuthStatus == GitHubAuthStatus.CONNECTED) {
+                        _state.value.githubMessage ?: "GitHub account verification failed"
+                    }
                 }
-                val exit = process.waitFor()
-                check(exit == 0) { sanitizeTerminalOutput(output.toString()).takeLast(500).ifBlank { "GitHub sign-in failed" } }
-                runGitHubCommand("gh auth setup-git")
-                refreshGitHubConnection()
-            }.onFailure { error ->
-                _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.ERROR, githubMessage = error.message?.take(240) ?: "GitHub sign-in failed", githubUserCode = null) }
+            } catch (timeout: TimeoutCancellationException) {
+                _state.update {
+                    it.copy(
+                        githubAuthStatus = GitHubAuthStatus.ERROR,
+                        githubMessage = "GitHub sign-in timed out. Retry when ready.",
+                        githubUserCode = null,
+                        githubVerificationUri = null,
+                        githubCanCancel = false,
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                if (githubAuthCancelledByUser) {
+                    _state.update {
+                        it.copy(
+                            githubAuthStatus = GitHubAuthStatus.DISCONNECTED,
+                            githubMessage = "GitHub sign-in cancelled",
+                            githubUserCode = null,
+                            githubVerificationUri = null,
+                            githubCanCancel = false,
+                        )
+                    }
+                } else {
+                    throw cancelled
+                }
+            } catch (error: Exception) {
+                _state.update {
+                    it.copy(
+                        githubAuthStatus = GitHubAuthStatus.ERROR,
+                        githubMessage = redactGitHubSensitiveOutput(error.message.orEmpty()).take(240).ifBlank { "GitHub sign-in failed" },
+                        githubUserCode = null,
+                        githubVerificationUri = null,
+                        githubCanCancel = false,
+                    )
+                }
+            } finally {
+                stopGitHubAuthProcess(process ?: githubAuthProcess)
+                githubAuthProcess = null
+                githubAuthJob = null
+                githubAuthCancelledByUser = false
             }
         }
     }
 
+    fun cancelGitHubConnection() {
+        if (githubAuthJob?.isActive != true) return
+        githubAuthCancelledByUser = true
+        stopGitHubAuthProcess(githubAuthProcess)
+        githubAuthJob?.cancel()
+    }
+
     fun disconnectGitHub() {
-        if (_state.value.githubAuthStatus == GitHubAuthStatus.STARTING) return
-        _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.STARTING, githubMessage = "Signing out of GitHub…") }
+        if (githubAuthJob?.isActive == true) return
+        _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.STARTING, githubMessage = "Signing out of GitHub…", githubCanCancel = false) }
         viewModelScope.launch(Dispatchers.IO) {
             val login = _state.value.githubLogin
             val command = if (login.isNullOrBlank()) "gh auth logout --hostname github.com" else "gh auth logout --hostname github.com --user ${shellQuote(login)}"
-            val result = runCatching { runGitHubCommand(command, "y\n") }
-            if (result.isSuccess && result.getOrThrow().first == 0) {
+            val result = try {
+                runGitHubCommand(command, "y\n")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                -1 to (error.message ?: "GitHub sign-out failed")
+            }
+            if (result.first == 0) {
                 preferences.githubLogin = ""
-                _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.DISCONNECTED, githubLogin = null, githubUserCode = null, githubVerificationUri = null, githubMessage = "Signed out of GitHub") }
+                _state.update {
+                    it.copy(
+                        githubAuthStatus = GitHubAuthStatus.DISCONNECTED,
+                        githubLogin = null,
+                        githubUserCode = null,
+                        githubVerificationUri = null,
+                        githubMessage = "Signed out of GitHub",
+                        githubCanCancel = false,
+                    )
+                }
             } else {
-                _state.update { it.copy(githubAuthStatus = GitHubAuthStatus.ERROR, githubMessage = result.exceptionOrNull()?.message ?: result.getOrNull()?.second?.takeLast(240) ?: "GitHub sign-out failed") }
+                _state.update {
+                    it.copy(
+                        githubAuthStatus = GitHubAuthStatus.ERROR,
+                        githubMessage = redactGitHubSensitiveOutput(result.second).takeLast(240).ifBlank { "GitHub sign-out failed" },
+                        githubCanCancel = false,
+                    )
+                }
             }
         }
+    }
+
+    override fun onCleared() {
+        githubAuthJob?.cancel()
+        stopGitHubAuthProcess(githubAuthProcess)
+        githubAuthProcess = null
+        super.onCleared()
     }
 
     fun getSavedApiKey(kind: ProviderKind): String = vault.get(kind.name).orEmpty()
@@ -2678,5 +2862,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val TEST_PROVIDER_DEFAULTS_VERSION = 1
         private const val TEST_OPENROUTER_BASE_URL = "https://openrouter.ai/api"
         private const val TEST_OPENROUTER_MODEL = "stealth/ox-alpha"
+        private const val GITHUB_CONFIG_DIR = "/root/.config/gh"
+        private const val GITHUB_DEVICE_URL = "https://github.com/login/device"
+        private const val GITHUB_LOGIN_COMMAND = "gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key"
+        private const val GITHUB_LOGIN_TIMEOUT_MS = 5L * 60L * 1000L
     }
 }

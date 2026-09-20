@@ -1591,6 +1591,8 @@ private fun RootScreenHost(
                     onBeginAntigravityLogin = viewModel::beginAntigravityLogin,
                     onConnectGitHub = viewModel::connectGitHub,
                     onDisconnectGitHub = viewModel::disconnectGitHub,
+                    onCancelGitHub = viewModel::cancelGitHubConnection,
+                    onRefreshGitHub = viewModel::refreshGitHubConnectionNow,
                     onSubmitAntigravityCode = viewModel::submitAntigravityCode,
                     onLogoutAntigravity = viewModel::logoutAntigravity,
                     onRefreshAntigravityModels = viewModel::refreshAntigravityModels,
