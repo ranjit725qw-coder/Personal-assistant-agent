@@ -32,7 +32,7 @@ internal fun classifyGitHubProbeFailure(output: String): GitHubProbeFailure {
 }
 
 
-internal data class GitHubRepository(
+data class GitHubRepository(
     val nameWithOwner: String,
     val cloneUrl: String,
     val isPrivate: Boolean,
