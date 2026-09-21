@@ -4004,31 +4004,97 @@ private fun ClaudeActivityDisclosure(
     headline: String,
     isRunning: Boolean = false,
 ) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
     var expandedItems by rememberSaveable { mutableStateOf(emptyList<Int>()) }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp)) {
-        if (items.isEmpty()) {
-            ActivitySummaryRow(
-                item = null,
-                text = headline,
-                expanded = 0 in expandedItems,
-                showProgress = isRunning,
-                onToggle = {
-                    expandedItems = if (0 in expandedItems) expandedItems - 0 else expandedItems + 0
-                },
-            )
-            if (0 in expandedItems) ActivityExpandedDetail(null, "Reviewing the request and planning the next action.")
-        } else {
-            items.forEachIndexed { index, item ->
-                ActivitySummaryRow(
-                    item = item,
-                    text = compactActivityText(item),
-                    expanded = index in expandedItems,
-                    showProgress = isRunning && !item.isComplete,
-                    onToggle = {
-                        expandedItems = if (index in expandedItems) expandedItems - index else expandedItems + index
-                    },
+    val visibleItems = if (items.isEmpty()) listOf<ActivityItem?>(null) else items
+    val stepCount = visibleItems.size
+    val statusText = when {
+        isRunning -> headline
+        items.isEmpty() -> "Finished reviewing the request"
+        else -> "Completed · ${activityName(items.last())}"
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 2.dp, vertical = 10.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 10.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.68f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
                 )
-                if (index in expandedItems) ActivityExpandedDetail(item, activityDetail(item))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "$stepCount step${if (stepCount == 1) "" else "s"}",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    statusText,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp,
+                    maxLines = if (expanded) 2 else 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (isRunning) {
+                AnimatedThinkingDots(dotColor = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(9.dp))
+            }
+            Icon(
+                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                if (expanded) "Hide work details" else "Show work details",
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        if (expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 17.dp, end = 10.dp, bottom = 8.dp),
+            ) {
+                visibleItems.forEachIndexed { index, item ->
+                    val itemExpanded = index in expandedItems
+                    ActivityTimelineRow(
+                        item = item,
+                        text = if (item == null) "Think · Reviewing the request" else compactActivityText(item),
+                        expanded = itemExpanded,
+                        showProgress = isRunning && (item == null || !item.isComplete),
+                        isLast = index == visibleItems.lastIndex,
+                        onToggle = {
+                            expandedItems = if (itemExpanded) expandedItems - index else expandedItems + index
+                        },
+                    )
+                    if (itemExpanded) {
+                        ActivityExpandedDetail(
+                            item = item,
+                            detail = item?.let(::activityDetail)
+                                ?: "Reviewing the request, understanding the goal, and planning the next safe action.",
+                        )
+                    }
+                }
             }
         }
     }
@@ -4165,36 +4231,77 @@ private fun AnimatedThinkingDots(
 }
 
 @Composable
-private fun ActivitySummaryRow(
+private fun ActivityTimelineRow(
     item: ActivityItem?,
     text: String,
     expanded: Boolean,
     showProgress: Boolean,
+    isLast: Boolean,
     onToggle: () -> Unit,
 ) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle),
+        verticalAlignment = Alignment.Top,
     ) {
-        Icon(
-            activityIcon(item),
-            null,
-            Modifier.size(16.dp),
-            tint = muted,
-        )
-        Spacer(Modifier.width(9.dp))
-        Text(text, Modifier.weight(1f), fontSize = 13.sp, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (showProgress) {
-            AnimatedThinkingDots(dotColor = muted)
-            Spacer(Modifier.width(6.dp))
+        Box(
+            modifier = Modifier.width(30.dp).height(48.dp),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            if (!isLast) {
+                Box(
+                    Modifier
+                        .padding(top = 20.dp)
+                        .width(1.dp)
+                        .height(34.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.78f)),
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .padding(top = 10.dp)
+                    .size(18.dp)
+                    .background(MaterialTheme.colorScheme.background, CircleShape)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    activityIcon(item),
+                    contentDescription = null,
+                    modifier = Modifier.size(10.dp),
+                    tint = if (showProgress) MaterialTheme.colorScheme.primary else muted,
+                )
+            }
         }
-        Icon(
-            if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-            if (expanded) "Collapse activity" else "Expand activity",
-            Modifier.size(18.dp),
-            tint = muted,
-        )
+        Spacer(Modifier.width(7.dp))
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .padding(top = 9.dp, bottom = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text,
+                modifier = Modifier.weight(1f),
+                fontSize = 12.5.sp,
+                lineHeight = 17.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = if (expanded) 3 else 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (showProgress) {
+                AnimatedThinkingDots(dotColor = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(7.dp))
+            }
+            Icon(
+                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                if (expanded) "Collapse step" else "Expand step",
+                modifier = Modifier.size(17.dp),
+                tint = muted,
+            )
+        }
     }
 }
 
@@ -4212,25 +4319,32 @@ private fun activityIcon(item: ActivityItem?): ImageVector = when {
 
 @Composable
 private fun ActivityExpandedDetail(item: ActivityItem?, detail: String) {
-    if (item?.isCommand == true) {
-        Text(
-            detail,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 25.dp, end = 8.dp, bottom = 8.dp),
-            fontSize = 12.sp,
-            lineHeight = 17.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontFamily = FontFamily.Monospace,
-        )
-    } else {
-        MarkdownText(
-            markdown = detail,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 25.dp, end = 8.dp, bottom = 8.dp),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 37.dp, end = 2.dp, bottom = 12.dp),
+        color = if (item?.isCommand == true) Color(0xFF11151D) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.46f),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+    ) {
+        SelectionContainer {
+            if (item?.isCommand == true) {
+                Text(
+                    detail,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    fontSize = 11.5.sp,
+                    lineHeight = 17.sp,
+                    color = Color(0xFFD7DCE5),
+                    fontFamily = FontFamily.Monospace,
+                )
+            } else {
+                MarkdownText(
+                    markdown = detail,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
