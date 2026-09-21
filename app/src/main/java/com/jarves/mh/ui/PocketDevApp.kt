@@ -313,6 +313,11 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onCreateChat = viewModel::createChat,
             onSwitchChat = viewModel::switchChat,
             onSwitchProject = viewModel::switchActiveProject,
+            onRefreshGitHubWork = viewModel::refreshGitHubWork,
+            onPrepareGitHubWorkBranch = viewModel::prepareGitHubWorkBranch,
+            onRunGitHubWorkChecks = viewModel::runGitHubWorkChecks,
+            onPublishGitHubPullRequest = viewModel::publishGitHubPullRequest,
+            onCancelGitHubWork = viewModel::cancelGitHubWork,
             onTerminalRun = viewModel::requestProjectTerminalCommand,
             onTerminalInput = viewModel::sendProjectTerminalInput,
             onTerminalInterrupt = viewModel::interruptProjectTerminalCommand,
@@ -2782,6 +2787,11 @@ private fun WorkspaceScreen(
     onCreateChat: () -> Unit,
     onSwitchChat: (String) -> Unit,
     onSwitchProject: (Project) -> Unit,
+    onRefreshGitHubWork: () -> Unit,
+    onPrepareGitHubWorkBranch: () -> Unit,
+    onRunGitHubWorkChecks: (String) -> Unit,
+    onPublishGitHubPullRequest: (String, String) -> Unit,
+    onCancelGitHubWork: () -> Unit,
     onTerminalRun: (String) -> Unit,
     onTerminalInput: (String) -> Unit,
     onTerminalInterrupt: () -> Unit,
@@ -2863,6 +2873,9 @@ private fun WorkspaceScreen(
 
     var selectedTab by rememberSaveable { mutableStateOf(WorkspaceTab.CHAT) }
     var showChats by rememberSaveable { mutableStateOf(false) }
+    var showGitHubWork by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(state.activeProject?.id) { onRefreshGitHubWork() }
     val activeChat = state.projectChats.firstOrNull { it.id == state.activeChatId }
 
     // If a file is open, show the FileViewerScreen on top
@@ -2883,6 +2896,17 @@ private fun WorkspaceScreen(
         return
     }
 
+    if (showGitHubWork) {
+        GitHubWorkModeSheet(
+            state = state,
+            onDismiss = { showGitHubWork = false },
+            onRefresh = onRefreshGitHubWork,
+            onPrepareBranch = onPrepareGitHubWorkBranch,
+            onRunChecks = onRunGitHubWorkChecks,
+            onPublish = onPublishGitHubPullRequest,
+            onCancel = onCancelGitHubWork,
+        )
+    }
     if (showChats) {
         ChatSwitcherDialog(
             chats = state.projectChats,
@@ -2970,6 +2994,12 @@ private fun WorkspaceScreen(
                             if (state.androidBuildRunning) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                             else Icon(Icons.Default.PlayArrow, "Build and run Android app")
                         }
+                    }
+                    if (state.githubAuthStatus == GitHubAuthStatus.CONNECTED) {
+                        IconButton(
+                            onClick = { showGitHubWork = true },
+                            enabled = !state.isRunning && !state.projectTerminalRunning,
+                        ) { Icon(Icons.Default.Code, "GitHub Work Mode") }
                     }
                     IconButton(onClick = { showChats = true }) { Icon(Icons.Default.History, "Project chats") }
                     if (state.isRunning) CircularProgressIndicator(Modifier.padding(12.dp).size(20.dp), strokeWidth = 2.dp)
@@ -3373,6 +3403,182 @@ private fun FilesTab(
             if (!entry.isDirectory) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f), modifier = Modifier.padding(start = (entry.depth * 20 + 42).dp))
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GitHubWorkModeSheet(
+    state: AppUiState,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onPrepareBranch: () -> Unit,
+    onRunChecks: (String) -> Unit,
+    onPublish: (String, String) -> Unit,
+    onCancel: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val projectName = state.activeProject?.name.orEmpty()
+    var checkCommand by rememberSaveable(state.activeProject?.id) { mutableStateOf("") }
+    var commitMessage by rememberSaveable(state.activeProject?.id) { mutableStateOf("Update $projectName") }
+    var pullRequestTitle by rememberSaveable(state.activeProject?.id) { mutableStateOf("Update $projectName") }
+    var confirmPublish by rememberSaveable { mutableStateOf(false) }
+    val work = state.githubWork
+    val protectedBranch = isProtectedGitBranch(work.branch, work.baseBranch)
+
+    if (confirmPublish) {
+        AlertDialog(
+            onDismissRequest = { confirmPublish = false },
+            icon = { Icon(Icons.Default.Shield, null) },
+            title = { Text("Commit, push, and open PR?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("This publishes the reviewed changes from ${work.branch} to GitHub and opens a pull request against ${work.baseBranch}.")
+                    Text("Checks passed: ${state.githubWorkCheckCommand}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    Text("Direct pushes to main/master are blocked.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    confirmPublish = false
+                    onPublish(commitMessage, pullRequestTitle)
+                }) { Text("Publish PR") }
+            },
+            dismissButton = { TextButton(onClick = { confirmPublish = false }) { Text("Cancel") } },
+        )
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = { if (!state.githubWorkRunning) onDismiss() },
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().fillMaxHeight(0.9f).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("GitHub Work Mode", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("Safe branch → AI edits → checks → review → PR", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                }
+                IconButton(onClick = onRefresh, enabled = !state.githubWorkRunning) { Icon(Icons.Default.Refresh, "Refresh Git status") }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("Repository", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (work.isRepository) projectName else "Not detected", fontWeight = FontWeight.SemiBold)
+                    Text("Branch: ${work.branch.ifBlank { "—" }}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    Text("Base: ${work.baseBranch}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    if (protectedBranch && work.isRepository) Text("Protected branch — prepare a work branch before editing", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    state.githubWorkMessage?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
+            }
+
+            if (state.githubWorkRunning) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+                OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("Cancel GitHub operation") }
+            }
+
+            Button(
+                onClick = onPrepareBranch,
+                enabled = !state.githubWorkRunning && work.isRepository && protectedBranch,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.Shield, null, Modifier.size(17.dp))
+                Spacer(Modifier.width(7.dp))
+                Text(if (protectedBranch) "Prepare safe work branch" else "Work branch ready")
+            }
+
+            Text("Changed files", fontWeight = FontWeight.SemiBold)
+            Surface(color = Color(0xFF0B0E14), shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+                SelectionContainer {
+                    Text(
+                        work.status.ifBlank { "Working tree is clean" },
+                        Modifier.padding(12.dp),
+                        color = Color(0xFFD5DAE3),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+            if (work.diffSummary.isNotBlank()) {
+                SelectionContainer { Text(work.diffSummary, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+            }
+
+            OutlinedTextField(
+                value = checkCommand,
+                onValueChange = { checkCommand = it },
+                label = { Text("Test/build command") },
+                placeholder = { Text("Example: ./gradlew test") },
+                enabled = !state.githubWorkRunning,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = { onRunChecks(checkCommand) },
+                enabled = !state.githubWorkRunning && work.isRepository && !protectedBranch && checkCommand.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (state.githubWorkChecksPassed) "Checks passed — run again" else "Run checks") }
+
+            if (state.githubWorkCheckOutput.isNotBlank()) {
+                Surface(color = Color(0xFF0B0E14), shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    SelectionContainer {
+                        Text(
+                            state.githubWorkCheckOutput,
+                            Modifier.padding(12.dp),
+                            color = if (state.githubWorkChecksPassed) Color(0xFF83E6B8) else Color(0xFFFFA4A4),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
+            }
+
+            OutlinedTextField(
+                value = commitMessage,
+                onValueChange = { commitMessage = it },
+                label = { Text("Commit message") },
+                enabled = !state.githubWorkRunning,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = pullRequestTitle,
+                onValueChange = { pullRequestTitle = it },
+                label = { Text("Pull request title") },
+                enabled = !state.githubWorkRunning,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = { confirmPublish = true },
+                enabled = !state.githubWorkRunning && state.githubWorkChecksPassed && !protectedBranch && commitMessage.isNotBlank() && pullRequestTitle.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Review confirmation and open PR") }
+
+            state.githubWorkPullRequestUrl?.let { url ->
+                Surface(color = PocketGreen.copy(alpha = 0.12f), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    SelectionContainer {
+                        Column(Modifier.padding(12.dp)) {
+                            Text("Pull request opened", color = PocketGreen, fontWeight = FontWeight.Bold)
+                            Text(url, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+            Text(
+                "The coding agent can edit files in chat, but GitHub Work Mode keeps commit, push, and PR publication behind checks and your confirmation.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp,
+            )
+            Spacer(Modifier.height(30.dp))
         }
     }
 }

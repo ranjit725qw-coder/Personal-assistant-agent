@@ -33,6 +33,35 @@ class GitHubConnectSupportTest {
         assertEquals(true, repositories.single().isPrivate)
     }
 
+    @Test fun parsesGitHubWorkSnapshotAndProtectsBaseBranch() {
+        val snapshot = parseGitHubWorkSnapshot(
+            """__REPOSITORY__
+yes
+__BRANCH__
+agent/update-login
+__BASE__
+main
+__STATUS__
+ M app.kt
+__DIFF__
+ app.kt | 2 +-
+""",
+        )
+        assertEquals(true, snapshot.isRepository)
+        assertEquals("agent/update-login", snapshot.branch)
+        assertEquals("main", snapshot.baseBranch)
+        assertEquals("M app.kt", snapshot.status)
+        assertEquals(false, isProtectedGitBranch(snapshot.branch, snapshot.baseBranch))
+        assertEquals(true, isProtectedGitBranch("main", snapshot.baseBranch))
+    }
+
+    @Test fun extractsPullRequestUrlFromCliOutput() {
+        assertEquals(
+            "https://github.com/owner/repo/pull/24",
+            extractGitHubPullRequestUrl("Creating pull request\nhttps://github.com/owner/repo/pull/24\n"),
+        )
+    }
+
     @Test fun ignoresUnsafeRepositoryUrls() {
         assertEquals(emptyList<GitHubRepository>(), parseGitHubRepositories(
             """[{"nameWithOwner":"owner/repo","url":"https://example.com/repo","isPrivate":false}]""",

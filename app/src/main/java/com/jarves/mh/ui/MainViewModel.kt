@@ -160,6 +160,13 @@ data class AppUiState(
     val githubRepositoriesLoading: Boolean = false,
     val githubRepositoryMessage: String? = null,
     val githubCloneInProgress: String? = null,
+    val githubWork: GitHubWorkSnapshot = GitHubWorkSnapshot(),
+    val githubWorkRunning: Boolean = false,
+    val githubWorkChecksPassed: Boolean = false,
+    val githubWorkCheckCommand: String = "",
+    val githubWorkCheckOutput: String = "",
+    val githubWorkPullRequestUrl: String? = null,
+    val githubWorkMessage: String? = null,
     val aiUsage: AiUsageSummary = AiUsageSummary(),
     val apiKeyHealth: List<ApiKeyHealth> = emptyList(),
     val projects: List<Project> = emptyList(),
@@ -266,6 +273,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile private var projectTerminalProcess: Process? = null
     @Volatile private var terminalProcess: Process? = null
     @Volatile private var githubAuthProcess: Process? = null
+    @Volatile private var githubWorkProcess: Process? = null
     @Volatile private var githubAuthCancelledByUser: Boolean = false
     private var githubAuthJob: Job? = null
     @Volatile private var projectTerminalProjectId: String? = null
@@ -1283,6 +1291,201 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun gitHubWorkSnapshotCommand(): String = """
+        if [ ! -d .git ]; then
+          printf '__REPOSITORY__\nno\n__BRANCH__\n\n__BASE__\nmain\n__STATUS__\n\n__DIFF__\n'
+          exit 0
+        fi
+        base=${'$'}(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
+        if [ -z "${'$'}base" ]; then
+          if git show-ref --verify --quiet refs/remotes/origin/main; then base=main
+          elif git show-ref --verify --quiet refs/remotes/origin/master; then base=master
+          else base=main; fi
+        fi
+        printf '__REPOSITORY__\nyes\n__BRANCH__\n%s\n__BASE__\n%s\n__STATUS__\n' "${'$'}(git branch --show-current)" "${'$'}base"
+        git status --short
+        printf '__DIFF__\n'
+        { git diff --stat; git diff --cached --stat; } | awk 'NF && !seen[${'$'}0]++'
+    """.trimIndent()
+
+    private fun runGitHubProjectCommand(project: Project, command: String, timeoutMs: Long = GITHUB_WORK_TIMEOUT_MS): Pair<Int, String> {
+        val runtime = installer.installedRuntime()
+        val workspace = projectWorkspaceRoot(project)
+        val process = installer.process(
+            runtime.proot,
+            runtime.rootfs,
+            workspace,
+            mapOf("GH_CONFIG_DIR" to GITHUB_CONFIG_DIR),
+            listOf("/usr/bin/bash", "-lc", "cd -- ${shellQuote(projectGuestRoot(project))} && $command"),
+            guestWorkspacePath = projectGuestRoot(project),
+            emulateHardLinks = false,
+        )
+        githubWorkProcess = process
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (process.isAlive && System.currentTimeMillis() < deadline) Thread.sleep(100)
+        if (process.isAlive) {
+            process.destroy()
+            Thread.sleep(250)
+            if (process.isAlive) process.destroyForcibly()
+            githubWorkProcess = null
+            error("GitHub work timed out")
+        }
+        val exit = process.waitFor()
+        val output = (process as? NativeSpawnProcess)?.outputFile?.let(::readProcessOutput).orEmpty()
+        githubWorkProcess = null
+        return exit to redactGitHubSensitiveOutput(sanitizeTerminalOutput(output)).trim()
+    }
+
+    fun refreshGitHubWork() {
+        val project = _state.value.activeProject ?: return
+        if (_state.value.githubWorkRunning || _state.value.isRunning || _state.value.projectTerminalRunning) return
+        _state.update { it.copy(githubWorkRunning = true, githubWorkMessage = "Checking Git repository…") }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { runGitHubProjectCommand(project, gitHubWorkSnapshotCommand(), GITHUB_WORK_READ_TIMEOUT_MS) }
+                .onSuccess { (exit, output) ->
+                    val snapshot = if (exit == 0) parseGitHubWorkSnapshot(output) else GitHubWorkSnapshot()
+                    _state.update { current ->
+                        if (current.activeProject?.id != project.id) current else current.copy(
+                            githubWork = snapshot,
+                            githubWorkRunning = false,
+                            githubWorkChecksPassed = if (snapshot.status.isBlank()) current.githubWorkChecksPassed else false,
+                            githubWorkPullRequestUrl = current.githubWorkPullRequestUrl,
+                            githubWorkMessage = when {
+                                exit != 0 -> output.takeLast(300).ifBlank { "Could not inspect Git repository" }
+                                !snapshot.isRepository -> "This project is not a Git repository"
+                                isProtectedGitBranch(snapshot.branch, snapshot.baseBranch) -> "Protected branch detected. Prepare a work branch before editing."
+                                snapshot.status.isBlank() -> "Work branch is clean"
+                                else -> "${snapshot.status.lineSequence().count()} changed files ready for review"
+                            },
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update { current ->
+                        if (current.activeProject?.id != project.id) current else current.copy(
+                            githubWorkRunning = false,
+                            githubWorkMessage = redactGitHubSensitiveOutput(error.message.orEmpty()).take(300).ifBlank { "Could not inspect Git repository" },
+                        )
+                    }
+                }
+        }
+    }
+
+    fun prepareGitHubWorkBranch() {
+        val project = _state.value.activeProject ?: return
+        val current = _state.value
+        if (current.githubAuthStatus != GitHubAuthStatus.CONNECTED || current.githubWorkRunning || current.isRunning || current.projectTerminalRunning) return
+        _state.update { it.copy(githubWorkRunning = true, githubWorkMessage = "Preparing a protected work branch…", githubWorkPullRequestUrl = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val branchSeed = "agent/mobile-harness-${System.currentTimeMillis().toString().takeLast(10)}"
+            val command = """
+                set -e
+                test -d .git || { echo 'This project is not a Git repository'; exit 2; }
+                base=${'$'}(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
+                if [ -z "${'$'}base" ]; then
+                  if git show-ref --verify --quiet refs/remotes/origin/main; then base=main
+                  elif git show-ref --verify --quiet refs/remotes/origin/master; then base=master
+                  else base=main; fi
+                fi
+                branch=${'$'}(git branch --show-current)
+                case "${'$'}branch" in main|master|"${'$'}base"|'') git switch -c ${shellQuote(branchSeed)} ;; esac
+                ${gitHubWorkSnapshotCommand()}
+            """.trimIndent()
+            runCatching { runGitHubProjectCommand(project, command) }
+                .onSuccess { (exit, output) ->
+                    val snapshot = parseGitHubWorkSnapshot(output)
+                    _state.update { state ->
+                        if (state.activeProject?.id != project.id) state else state.copy(
+                            githubWork = snapshot,
+                            githubWorkRunning = false,
+                            githubWorkChecksPassed = false,
+                            githubWorkCheckCommand = "",
+                            githubWorkCheckOutput = "",
+                            githubWorkMessage = if (exit == 0 && snapshot.isRepository && !isProtectedGitBranch(snapshot.branch, snapshot.baseBranch))
+                                "Safe work branch ready: ${snapshot.branch}" else output.takeLast(400).ifBlank { "Could not prepare a work branch" },
+                        )
+                    }
+                }
+                .onFailure { error -> _state.update { it.copy(githubWorkRunning = false, githubWorkMessage = error.message?.take(300) ?: "Could not prepare a work branch") } }
+        }
+    }
+
+    fun runGitHubWorkChecks(command: String) {
+        val project = _state.value.activeProject ?: return
+        val checkCommand = command.trim()
+        val current = _state.value
+        if (checkCommand.isBlank() || current.githubWorkRunning || current.isRunning || current.projectTerminalRunning ||
+            !current.githubWork.isRepository || isProtectedGitBranch(current.githubWork.branch, current.githubWork.baseBranch)
+        ) return
+        _state.update { it.copy(githubWorkRunning = true, githubWorkChecksPassed = false, githubWorkCheckCommand = checkCommand, githubWorkCheckOutput = "", githubWorkMessage = "Running checks…") }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { runGitHubProjectCommand(project, checkCommand, GITHUB_WORK_CHECK_TIMEOUT_MS) }
+                .onSuccess { (exit, output) ->
+                    _state.update { state -> state.copy(
+                        githubWorkRunning = false,
+                        githubWorkChecksPassed = exit == 0,
+                        githubWorkCheckOutput = output.takeLast(6_000),
+                        githubWorkMessage = if (exit == 0) "Checks passed" else "Checks failed with exit code $exit",
+                    ) }
+                    refreshGitHubWork()
+                }
+                .onFailure { error -> _state.update { it.copy(githubWorkRunning = false, githubWorkChecksPassed = false, githubWorkCheckOutput = error.message.orEmpty().takeLast(2_000), githubWorkMessage = "Checks failed") } }
+        }
+    }
+
+    fun publishGitHubPullRequest(commitMessage: String, pullRequestTitle: String) {
+        val project = _state.value.activeProject ?: return
+        val current = _state.value
+        val commit = commitMessage.trim()
+        val title = pullRequestTitle.trim()
+        val work = current.githubWork
+        if (commit.isBlank() || title.isBlank() || current.githubWorkRunning || current.isRunning || current.projectTerminalRunning ||
+            current.githubAuthStatus != GitHubAuthStatus.CONNECTED || !work.isRepository ||
+            isProtectedGitBranch(work.branch, work.baseBranch) || !current.githubWorkChecksPassed
+        ) return
+        _state.update { it.copy(githubWorkRunning = true, githubWorkMessage = "Committing, pushing, and opening a pull request…", githubWorkPullRequestUrl = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val body = buildString {
+                append("Created from Mobile Harness GitHub Work Mode.\\n\\n")
+                append("Checks: `")
+                append(current.githubWorkCheckCommand.replace("`", "'"))
+                append("` (passed)")
+            }
+            val command = """
+                set -e
+                branch=${'$'}(git branch --show-current)
+                case "${'$'}branch" in ''|main|master|${shellQuote(work.baseBranch)}) echo 'Refusing to publish from a protected branch'; exit 3 ;; esac
+                git add -A
+                if ! git diff --cached --quiet; then git commit -m ${shellQuote(commit)}; fi
+                test "${'$'}(git rev-list --count origin/${shellQuote(work.baseBranch)}..HEAD)" -gt 0 || { echo 'No commits to publish'; exit 4; }
+                git push --set-upstream origin HEAD
+                gh pr create --base ${shellQuote(work.baseBranch)} --head "${'$'}branch" --title ${shellQuote(title)} --body ${shellQuote(body)}
+            """.trimIndent()
+            runCatching { runGitHubProjectCommand(project, command, GITHUB_WORK_PUBLISH_TIMEOUT_MS) }
+                .onSuccess { (exit, output) ->
+                    val url = if (exit == 0) extractGitHubPullRequestUrl(output) else null
+                    _state.update { state -> state.copy(
+                        githubWorkRunning = false,
+                        githubWorkPullRequestUrl = url,
+                        githubWorkMessage = if (exit == 0 && url != null) "Pull request opened successfully" else output.takeLast(800).ifBlank { "Could not open pull request" },
+                    ) }
+                    refreshGitHubWork()
+                }
+                .onFailure { error -> _state.update { it.copy(githubWorkRunning = false, githubWorkMessage = redactGitHubSensitiveOutput(error.message.orEmpty()).take(500).ifBlank { "Could not open pull request" }) } }
+        }
+    }
+
+    fun cancelGitHubWork() {
+        val process = githubWorkProcess ?: return
+        runCatching { process.destroy() }
+        viewModelScope.launch(Dispatchers.IO) {
+            Thread.sleep(300)
+            if (process.isAlive) runCatching { process.destroyForcibly() }
+            if (githubWorkProcess === process) githubWorkProcess = null
+            _state.update { it.copy(githubWorkRunning = false, githubWorkMessage = "GitHub work cancelled") }
+        }
+    }
+
     fun connectGitHub() {
         if (githubAuthJob?.isActive == true) return
         githubAuthCancelledByUser = false
@@ -1451,6 +1654,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         githubAuthJob?.cancel()
         stopGitHubAuthProcess(githubAuthProcess)
         githubAuthProcess = null
+        stopGitHubAuthProcess(githubWorkProcess)
+        githubWorkProcess = null
         super.onCleared()
     }
 
@@ -1985,9 +2190,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 previewReady = false,
                 previewUrl = null,
                 pendingAttachments = emptyList(),
+                githubWork = GitHubWorkSnapshot(),
+                githubWorkRunning = false,
+                githubWorkChecksPassed = false,
+                githubWorkCheckCommand = "",
+                githubWorkCheckOutput = "",
+                githubWorkPullRequestUrl = null,
+                githubWorkMessage = null,
             )
         }
         refreshProjectFiles()
+        refreshGitHubWork()
         viewModelScope.launch {
             val pending = activeRuntime().loadPendingChanges(project.id)
             if (_state.value.activeProject?.id == project.id) _state.update { it.copy(changes = pending) }
@@ -2560,8 +2773,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         touchProject(project.id)
         persistMessages()
         val history = state.value.messages // includes all messages up to now
-        val runtimePrompt = if (attachments.isEmpty()) requestText else buildString {
+        val guardedRequest = if (_state.value.githubWork.isRepository) buildString {
+            appendLine("<github_work_mode>")
+            appendLine("Work only inside the active project. Never switch to, commit on, or push main/master/the base branch.")
+            appendLine("Do not commit, push, or open a pull request yourself; the user will review checks and publish through GitHub Work Mode.")
+            appendLine("Implement the requested code changes and run only non-destructive local inspection or tests needed for the task.")
+            appendLine("</github_work_mode>")
             appendLine(requestText)
+        } else requestText
+        val runtimePrompt = if (attachments.isEmpty()) guardedRequest else buildString {
+            appendLine(guardedRequest)
             appendLine()
             appendLine("<attached_files>")
             attachments.forEach { attachment ->
@@ -2981,5 +3202,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val GITHUB_DEVICE_URL = "https://github.com/login/device"
         private const val GITHUB_LOGIN_COMMAND = "gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key"
         private const val GITHUB_LOGIN_TIMEOUT_MS = 5L * 60L * 1000L
+        private const val GITHUB_WORK_READ_TIMEOUT_MS = 30_000L
+        private const val GITHUB_WORK_TIMEOUT_MS = 2L * 60L * 1000L
+        private const val GITHUB_WORK_CHECK_TIMEOUT_MS = 20L * 60L * 1000L
+        private const val GITHUB_WORK_PUBLISH_TIMEOUT_MS = 10L * 60L * 1000L
     }
 }
