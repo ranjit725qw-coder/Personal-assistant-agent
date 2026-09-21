@@ -57,6 +57,8 @@ import com.jarves.mh.update.AppUpdateInfo
 import com.jarves.mh.update.AppUpdater
 import java.io.File
 import java.io.RandomAccessFile
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.UnknownHostException
 import java.nio.file.Files
 import java.util.UUID
@@ -196,6 +198,7 @@ data class AppUiState(
     val currentTaskRequest: String? = null,
     val previewReady: Boolean = false,
     val previewUrl: String? = null,
+    val previewOpenRequest: Long = 0L,
     val isRunning: Boolean = false,
     val activeSessionId: String? = null,
     val toastMessage: String? = null,
@@ -272,6 +275,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (BuildConfig.DEBUG) preferences.debugUpdateManifestUrl else "",
     )
     @Volatile private var projectTerminalProcess: Process? = null
+    @Volatile private var automaticPreviewProcess: Process? = null
+    private var automaticPreviewJob: Job? = null
     @Volatile private var terminalProcess: Process? = null
     @Volatile private var githubAuthProcess: Process? = null
     @Volatile private var githubWorkProcess: Process? = null
@@ -734,6 +739,77 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ?: return null
         val port = match.groupValues.getOrNull(1)?.toIntOrNull() ?: 8000
         return port.takeIf { it in 1..65535 }?.let { "http://127.0.0.1:$it/" }
+    }
+
+    private fun startAutomaticPreview(project: Project) {
+        automaticPreviewJob?.cancel()
+        stopAutomaticPreview()
+        automaticPreviewJob = viewModelScope.launch(Dispatchers.IO) {
+            val root = projectWorkspaceRoot(project)
+            val ignored = setOf("node_modules", ".git", "build", ".gradle")
+            val manifest = root.walkTopDown().onEnter { it == root || it.name !in ignored }
+                .maxDepth(3).firstOrNull { it.isFile && it.name == "package.json" }
+            val index = root.walkTopDown().onEnter { it == root || it.name !in ignored }
+                .maxDepth(4).firstOrNull { it.isFile && it.name.equals("index.html", true) }
+            if (manifest == null && index == null) return@launch
+            val scripts = manifest?.let { runCatching { JSONObject(it.readText()).optJSONObject("scripts") }.getOrNull() }
+            val work = manifest?.parentFile ?: index!!.parentFile
+            val ports = listOf(4173, 3000, 8080, 8000, 5173, 8888)
+            for (port in ports) {
+                if (_state.value.activeProject?.id != project.id) return@launch
+                val command = when {
+                    !scripts?.optString("dev").isNullOrBlank() -> "test -d node_modules || npm install --no-audit --no-fund; exec npm run dev -- --host 0.0.0.0 --port $port"
+                    !scripts?.optString("start").isNullOrBlank() -> "test -d node_modules || npm install --no-audit --no-fund; export HOST=0.0.0.0 PORT=$port; exec npm start"
+                    else -> "exec python3 -m http.server $port --bind 0.0.0.0"
+                }
+                val runtime = installer.installedRuntime()
+                val process = runCatching { installer.process(
+                    runtime.proot, runtime.rootfs, work,
+                    mapOf("HOST" to "0.0.0.0", "PORT" to port.toString()),
+                    listOf("/usr/bin/bash", "-lc", command), projectGuestRoot(project), false,
+                ) }.getOrNull() ?: continue
+                automaticPreviewProcess = process
+                val url = "http://127.0.0.1:$port/"
+                var ready = false
+                repeat(40) {
+                    if (process.isAlive && previewReachable(port)) ready = true
+                    if (!ready) delay(500)
+                }
+                if (ready) {
+                    _state.update { current -> if (current.activeProject?.id == project.id) current.copy(
+                        previewReady = true, previewUrl = url,
+                        previewOpenRequest = current.previewOpenRequest + 1,
+                        activity = listOf(ActivityItem("Preview ready", url)) + current.activity,
+                    ) else current }
+                    var failures = 0
+                    while (process.isAlive && _state.value.activeProject?.id == project.id && failures < 3) {
+                        delay(4_000)
+                        failures = if (previewReachable(port)) 0 else failures + 1
+                    }
+                    if (_state.value.activeProject?.id != project.id) return@launch
+                    _state.update { it.copy(previewReady = false) }
+                }
+                runCatching { process.destroy() }
+                if (process.isAlive) runCatching { process.destroyForcibly() }
+                delay(1_000)
+            }
+            if (_state.value.activeProject?.id == project.id) _state.update {
+                it.copy(previewReady = false, toastMessage = "Automatic preview could not reconnect yet.")
+            }
+        }
+    }
+
+    private fun previewReachable(port: Int): Boolean = runCatching {
+        Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 1_000) }
+        true
+    }.getOrDefault(false)
+
+    private fun stopAutomaticPreview() {
+        automaticPreviewProcess?.let { process ->
+            runCatching { process.destroy() }
+            if (process.isAlive) runCatching { process.destroyForcibly() }
+        }
+        automaticPreviewProcess = null
     }
 
     private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
@@ -1686,6 +1762,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        automaticPreviewJob?.cancel()
+        stopAutomaticPreview()
         githubAuthJob?.cancel()
         stopGitHubAuthProcess(githubAuthProcess)
         githubAuthProcess = null
@@ -2251,6 +2329,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch { activeRuntime().stopActiveSession() }
         }
         if (_state.value.projectTerminalRunning) stopProjectTerminalCommand()
+        automaticPreviewJob?.cancel()
+        stopAutomaticPreview()
 
         if (active != null) {
             val chats = preferences.loadProjectChats(active.id)
@@ -3245,7 +3325,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (event is RuntimeEvent.FilesChanged || event is RuntimeEvent.SessionCompleted) {
             _state.value.activeProject?.id?.let { touchProject(it) }
             refreshProjectFiles()
-            if (event is RuntimeEvent.SessionCompleted && _state.value.githubWork.isRepository) refreshGitHubWork()
+            if (event is RuntimeEvent.SessionCompleted) {
+                _state.value.activeProject?.let(::startAutomaticPreview)
+                if (_state.value.githubWork.isRepository) refreshGitHubWork()
+            }
         }
         if (event is RuntimeEvent.AssistantDelta || event is RuntimeEvent.SessionCompleted || event is RuntimeEvent.SessionFailed) {
             persistMessages()
