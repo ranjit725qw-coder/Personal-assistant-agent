@@ -156,6 +156,10 @@ data class AppUiState(
     val githubVerificationUri: String? = null,
     val githubMessage: String? = null,
     val githubCanCancel: Boolean = false,
+    val githubRepositories: List<GitHubRepository> = emptyList(),
+    val githubRepositoriesLoading: Boolean = false,
+    val githubRepositoryMessage: String? = null,
+    val githubCloneInProgress: String? = null,
     val aiUsage: AiUsageSummary = AiUsageSummary(),
     val apiKeyHealth: List<ApiKeyHealth> = emptyList(),
     val projects: List<Project> = emptyList(),
@@ -1178,6 +1182,107 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { refreshGitHubConnection() }
     }
 
+    fun refreshGitHubRepositories() {
+        val current = _state.value
+        if (current.githubAuthStatus != GitHubAuthStatus.CONNECTED || current.githubRepositoriesLoading) return
+        _state.update { it.copy(githubRepositoriesLoading = true, githubRepositoryMessage = "Loading repositories…") }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val (exit, output) = runGitHubCommand(
+                    "gh repo list --limit 100 --json nameWithOwner,url,isPrivate,description,updatedAt",
+                )
+                check(exit == 0) { output.takeLast(300).ifBlank { "Could not load GitHub repositories" } }
+                val repositories = parseGitHubRepositories(output)
+                _state.update {
+                    it.copy(
+                        githubRepositories = repositories,
+                        githubRepositoriesLoading = false,
+                        githubRepositoryMessage = if (repositories.isEmpty()) "No repositories found for this account"
+                            else "${repositories.size} repositories available",
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _state.update {
+                    it.copy(
+                        githubRepositoriesLoading = false,
+                        githubRepositoryMessage = redactGitHubSensitiveOutput(error.message.orEmpty())
+                            .take(240).ifBlank { "Could not load GitHub repositories" },
+                    )
+                }
+            }
+        }
+    }
+
+    fun cloneGitHubRepository(repository: GitHubRepository) {
+        val current = _state.value
+        if (current.githubAuthStatus != GitHubAuthStatus.CONNECTED ||
+            current.githubCloneInProgress != null || current.isRunning || current.projectTerminalRunning
+        ) return
+        val baseSlug = projectSlug(repository.name)
+        val usedSlugs = current.projects.mapTo(mutableSetOf()) { it.slug }
+        val slug = generateSequence(1) { it + 1 }
+            .map { number -> if (number == 1) baseSlug else "$baseSlug-$number" }
+            .first { it !in usedSlugs }
+        val project = Project(
+            name = repository.name,
+            description = repository.description.ifBlank { "GitHub repository · ${repository.nameWithOwner}" },
+            language = "Git",
+            slug = slug,
+        )
+        _state.update { it.copy(githubCloneInProgress = repository.nameWithOwner, githubRepositoryMessage = "Cloning ${repository.nameWithOwner}…") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val workspace = File(getApplication<Application>().filesDir, "workspaces/${project.id}").apply { mkdirs() }
+            try {
+                val runtime = installer.installedRuntime()
+                val process = installer.process(
+                    runtime.proot,
+                    runtime.rootfs,
+                    workspace,
+                    mapOf("GH_CONFIG_DIR" to GITHUB_CONFIG_DIR),
+                    listOf(
+                        "/usr/bin/bash", "-lc",
+                        "gh repo clone ${shellQuote(repository.nameWithOwner)} . -- --depth 1",
+                    ),
+                    guestWorkspacePath = projectGuestRoot(project),
+                    emulateHardLinks = false,
+                )
+                val exit = process.waitFor()
+                val output = (process as? NativeSpawnProcess)?.outputFile?.let(::readProcessOutput).orEmpty()
+                check(exit == 0) {
+                    redactGitHubSensitiveOutput(sanitizeTerminalOutput(output)).takeLast(500)
+                        .ifBlank { "Repository clone failed" }
+                }
+                val firstChat = ProjectChat(title = "Main chat")
+                preferences.saveProjectChats(project.id, listOf(firstChat))
+                _state.update { state ->
+                    state.copy(
+                        projects = listOf(project) + state.projects,
+                        githubCloneInProgress = null,
+                        githubRepositoryMessage = "Cloned ${repository.nameWithOwner}",
+                        toastMessage = "Repository cloned. Opening ${project.name}…",
+                    )
+                }
+                preferences.saveProjects(_state.value.projects)
+                withContext(Dispatchers.Main) { openProject(project) }
+            } catch (cancelled: CancellationException) {
+                workspace.deleteRecursively()
+                _state.update { it.copy(githubCloneInProgress = null) }
+                throw cancelled
+            } catch (error: Exception) {
+                workspace.deleteRecursively()
+                _state.update {
+                    it.copy(
+                        githubCloneInProgress = null,
+                        githubRepositoryMessage = redactGitHubSensitiveOutput(error.message.orEmpty())
+                            .take(300).ifBlank { "Repository clone failed" },
+                    )
+                }
+            }
+        }
+    }
+
     fun connectGitHub() {
         if (githubAuthJob?.isActive == true) return
         githubAuthCancelledByUser = false
@@ -1325,6 +1430,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         githubVerificationUri = null,
                         githubMessage = "Signed out of GitHub",
                         githubCanCancel = false,
+                        githubRepositories = emptyList(),
+                        githubRepositoryMessage = null,
+                        githubCloneInProgress = null,
                     )
                 }
             } else {
@@ -1832,6 +1940,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    fun switchActiveProject(project: Project) {
+        val current = _state.value
+        if (current.isRunning || current.projectTerminalRunning || current.activeProject?.id == project.id) return
+        persistMessages()
+        openProject(project)
     }
 
     fun openProject(project: Project) {
