@@ -58,3 +58,4 @@ jobs:
           git push
           test "${{ steps.patch.outcome }}" = "success"
           test "${{ steps.gradle.outcome }}" = "success"
+# Trigger validation after workflow registration.
