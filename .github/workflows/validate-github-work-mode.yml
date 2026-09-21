@@ -1,0 +1,56 @@
+name: Validate GitHub Work Mode
+on:
+  push:
+    branches: [feature/github-work-mode]
+    paths:
+      - 'scripts/github-work-mode.b64.*'
+      - '.github/workflows/validate-github-work-mode.yml'
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Apply GitHub Work Mode patch
+        id: patch
+        continue-on-error: true
+        run: |
+          cat scripts/github-work-mode.b64.* | base64 -d | gzip -d > /tmp/add_github_work_mode.py
+          python3 /tmp/add_github_work_mode.py > github-work-mode-validation.txt 2>&1
+          git diff --check >> github-work-mode-validation.txt 2>&1
+      - uses: actions/setup-java@v5
+        if: steps.patch.outcome == 'success'
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Configure Android SDK
+        if: steps.patch.outcome == 'success'
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort -V | tail -n 1)"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+      - name: Compile, test, lint and assemble
+        if: steps.patch.outcome == 'success'
+        id: gradle
+        continue-on-error: true
+        run: |
+          chmod +x gradlew
+          ./gradlew clean compileOnlineReleaseKotlin testOnlineReleaseUnitTest lintOnlineRelease assembleOnlineDebug --stacktrace >> github-work-mode-validation.txt 2>&1
+      - name: Commit implementation and diagnostics
+        if: always()
+        run: |
+          echo "PATCH=${{ steps.patch.outcome }}" >> github-work-mode-validation.txt
+          echo "VALIDATION=${{ steps.gradle.outcome }}" >> github-work-mode-validation.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src github-work-mode-validation.txt
+          git commit -m "Implement and validate GitHub Work Mode"
+          git push
+          test "${{ steps.patch.outcome }}" = "success"
+          test "${{ steps.gradle.outcome }}" = "success"
