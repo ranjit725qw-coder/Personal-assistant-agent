@@ -55,11 +55,13 @@ internal fun isProtectedGitBranch(branch: String, baseBranch: String): Boolean =
 
 internal fun parseGitHubWorkSnapshot(output: String): GitHubWorkSnapshot {
     fun section(name: String, next: String?): String {
-        val marker = "__$name__\n"
+        val marker = "__${name}__\n"
         val start = output.indexOf(marker)
         if (start < 0) return ""
         val bodyStart = start + marker.length
-        val end = next?.let { output.indexOf("__$it__\n", bodyStart).takeIf { index -> index >= 0 } } ?: output.length
+        val end = next?.let { nextName ->
+            output.indexOf("__${nextName}__\n", bodyStart).takeIf { index -> index >= 0 }
+        } ?: output.length
         return output.substring(bodyStart, end).trim()
     }
     val repository = section("REPOSITORY", "BRANCH") == "yes"
@@ -73,7 +75,7 @@ internal fun parseGitHubWorkSnapshot(output: String): GitHubWorkSnapshot {
 }
 
 internal fun extractGitHubPullRequestUrl(output: String): String? =
-    Regex("https://github\.com/[^\s/]+/[^\s/]+/pull/\d+").findAll(output).lastOrNull()?.value
+    Regex("""https://github\.com/[^\s/]+/[^\s/]+/pull/\d+""").findAll(output).lastOrNull()?.value
 
 internal fun parseGitHubRepositories(json: String): List<GitHubRepository> {
     val array = JSONArray(json)
