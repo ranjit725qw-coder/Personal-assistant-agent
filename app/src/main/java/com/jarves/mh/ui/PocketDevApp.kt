@@ -2875,6 +2875,9 @@ private fun WorkspaceScreen(
     var showChats by rememberSaveable { mutableStateOf(false) }
     var showGitHubWork by rememberSaveable { mutableStateOf(false) }
 
+    LaunchedEffect(state.previewOpenRequest) {
+        if (state.previewReady && state.previewOpenRequest > 0L) selectedTab = WorkspaceTab.PREVIEW
+    }
     LaunchedEffect(state.activeProject?.id) { onRefreshGitHubWork() }
     val activeChat = state.projectChats.firstOrNull { it.id == state.activeChatId }
 
@@ -4748,7 +4751,7 @@ private fun PreviewTab(ready: Boolean, url: String?) {
         }
         val targetUrl = activeUrl
         if (targetUrl == null) {
-            EmptyState(Icons.Default.PlayArrow, "Preview not running", "Enter a localhost URL above, or start a local web server in the project Terminal.")
+            EmptyState(Icons.Default.PlayArrow, "Preparing preview", "Mobile Harness starts, checks, and reconnects the local website server automatically.")
         } else {
             AndroidView(
                 factory = { context ->
