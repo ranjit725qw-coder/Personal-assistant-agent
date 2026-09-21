@@ -2843,7 +2843,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     var snapshot = parseGitHubWorkSnapshot(snapshotOutput)
                     if (snapshot.isRepository && isProtectedGitBranch(snapshot.branch, snapshot.baseBranch)) {
                         val branch = "agent/mobile-harness-${System.currentTimeMillis().toString().takeLast(10)}"
-                        val (exit, output) = runGitHubProjectCommand(project, prepareGitHubWorkBranchCommand(branch))
+                        val (exit, output) = runGitHubProjectCommand(project, GitHubWorkCommands.prepareBranch(branch))
                         if (exit != 0) error(output.ifBlank { "Could not prepare a safe work branch" })
                         snapshot = parseGitHubWorkSnapshot(output)
                     }
