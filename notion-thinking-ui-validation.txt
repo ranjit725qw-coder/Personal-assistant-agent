@@ -261,3 +261,5 @@ BUILD SUCCESSFUL in 4m 29s
 80 actionable tasks: 79 executed, 1 up-to-date
 PATCH=success
 VALIDATION=success
+PATCH=failure
+VALIDATION=skipped
