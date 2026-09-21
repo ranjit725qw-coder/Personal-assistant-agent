@@ -85,6 +85,8 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -2872,6 +2874,8 @@ private fun WorkspaceScreen(
     }
 
     var selectedTab by rememberSaveable { mutableStateOf(WorkspaceTab.CHAT) }
+    var previewFullScreen by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = previewFullScreen) { previewFullScreen = false }
     var showChats by rememberSaveable { mutableStateOf(false) }
     var showGitHubWork by rememberSaveable { mutableStateOf(false) }
 
@@ -2952,7 +2956,8 @@ private fun WorkspaceScreen(
     }
     Scaffold(
         topBar = {
-            TopAppBar(
+            if (!previewFullScreen) {
+                TopAppBar(
                 title = {
                     Column(Modifier.fillMaxWidth()) {
                         Text(
@@ -3008,10 +3013,11 @@ private fun WorkspaceScreen(
                     if (state.isRunning) CircularProgressIndicator(Modifier.padding(12.dp).size(20.dp), strokeWidth = 2.dp)
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-            )
+                )
+            }
         },
         bottomBar = {
-            if (!keyboardVisible) NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+            if (!previewFullScreen && !keyboardVisible) NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                 WorkspaceTab.entries.filter { it != WorkspaceTab.CHANGES }.forEach { tab ->
                     NavigationBarItem(
                         selected = selectedTab == tab,
@@ -3107,7 +3113,12 @@ private fun WorkspaceScreen(
                     onUndoFileChange,
                     onKeepFileChange,
                 )
-                WorkspaceTab.PREVIEW -> PreviewTab(state.previewReady, state.previewUrl)
+                WorkspaceTab.PREVIEW -> PreviewTab(
+                    ready = state.previewReady,
+                    url = state.previewUrl,
+                    fullScreen = previewFullScreen,
+                    onToggleFullScreen = { previewFullScreen = !previewFullScreen },
+                )
             }
         }
     }
@@ -4666,7 +4677,12 @@ private fun DiffLineRow(line: DiffLine) {
 }
 
 @Composable
-private fun PreviewTab(ready: Boolean, url: String?) {
+private fun PreviewTab(
+    ready: Boolean,
+    url: String?,
+    fullScreen: Boolean,
+    onToggleFullScreen: () -> Unit,
+) {
     var address by rememberSaveable(url) { mutableStateOf(if (ready) url.orEmpty() else "") }
     var activeUrl by rememberSaveable(url) { mutableStateOf(if (ready) url else null) }
     var addressError by remember { mutableStateOf<String?>(null) }
@@ -4693,102 +4709,107 @@ private fun PreviewTab(ready: Boolean, url: String?) {
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-            tonalElevation = 1.dp,
-        ) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = address,
-                        onValueChange = {
-                            address = it
-                            addressError = null
-                        },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        label = { Text("Preview URL") },
-                        placeholder = { Text("localhost:3000") },
-                        leadingIcon = {
-                            Box(
-                                Modifier.size(8.dp).background(
-                                    if (activeUrl != null) PocketGreen else MaterialTheme.colorScheme.outline,
-                                    CircleShape,
-                                ),
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            if (!fullScreen) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    tonalElevation = 1.dp,
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = address,
+                                onValueChange = {
+                                    address = it
+                                    addressError = null
+                                },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                label = { Text("Preview URL") },
+                                placeholder = { Text("localhost:3000") },
+                                leadingIcon = {
+                                    Box(
+                                        Modifier.size(8.dp).background(
+                                            if (activeUrl != null) PocketGreen else MaterialTheme.colorScheme.outline,
+                                            CircleShape,
+                                        ),
+                                    )
+                                },
+                                trailingIcon = {
+                                    IconButton(onClick = navigate) {
+                                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Open URL")
+                                    }
+                                },
+                                isError = addressError != null,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+                                keyboardActions = KeyboardActions(onGo = { navigate() }),
                             )
-                        },
-                        trailingIcon = {
-                            IconButton(onClick = navigate) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Open URL")
+                            IconButton(onClick = { webView?.reload() ?: navigate() }, enabled = address.isNotBlank()) {
+                                Icon(Icons.Default.Refresh, contentDescription = "Refresh preview")
                             }
-                        },
-                        isError = addressError != null,
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Uri,
-                            imeAction = ImeAction.Go,
-                        ),
-                        keyboardActions = KeyboardActions(onGo = { navigate() }),
-                    )
-                    IconButton(
-                        onClick = { webView?.reload() ?: navigate() },
-                        enabled = address.isNotBlank(),
-                    ) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh preview")
+                            IconButton(onClick = onToggleFullScreen, enabled = activeUrl != null) {
+                                Icon(Icons.Default.Fullscreen, contentDescription = "Open full-screen preview")
+                            }
+                        }
+                        if (addressError != null) {
+                            Text(addressError.orEmpty(), color = MaterialTheme.colorScheme.error, fontSize = 11.sp, modifier = Modifier.padding(start = 16.dp, top = 3.dp))
+                        } else if (loading) {
+                            LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 5.dp))
+                        }
                     }
-                }
-                if (addressError != null) {
-                    Text(
-                        addressError.orEmpty(),
-                        color = MaterialTheme.colorScheme.error,
-                        fontSize = 11.sp,
-                        modifier = Modifier.padding(start = 16.dp, top = 3.dp),
-                    )
-                } else if (loading) {
-                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 5.dp))
                 }
             }
-        }
-        val targetUrl = activeUrl
-        if (targetUrl == null) {
-            EmptyState(Icons.Default.PlayArrow, "Preparing preview", "Mobile Harness starts, checks, and reconnects the local website server automatically.")
-        } else {
-            AndroidView(
-                factory = { context ->
-                    WebView(context).apply {
-                        webView = this
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                loading = newProgress < 100
+            val targetUrl = activeUrl
+            if (targetUrl == null) {
+                EmptyState(Icons.Default.PlayArrow, "Preparing preview", "Mobile Harness starts, checks, and reconnects the local website server automatically.")
+            } else {
+                AndroidView(
+                    factory = { context ->
+                        WebView(context).apply {
+                            webView = this
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onProgressChanged(view: WebView?, newProgress: Int) { loading = newProgress < 100 }
                             }
-                        }
-                        webViewClient = object : WebViewClient() {
-                            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                                val target = request?.url ?: return true
-                                if (!target.isLoopbackPreviewUrl()) {
-                                    addressError = "External navigation is blocked in project preview"
-                                    return true
+                            webViewClient = object : WebViewClient() {
+                                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                                    val target = request?.url ?: return true
+                                    if (!target.isLoopbackPreviewUrl()) {
+                                        addressError = "External navigation is blocked in project preview"
+                                        return true
+                                    }
+                                    address = target.toString()
+                                    return false
                                 }
-                                address = target.toString()
-                                return false
+                                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                                    val target = request?.url ?: return blockedPreviewResponse()
+                                    return if (target.isLoopbackPreviewUrl()) null else blockedPreviewResponse()
+                                }
                             }
-
-                            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                                val target = request?.url ?: return blockedPreviewResponse()
-                                return if (target.isLoopbackPreviewUrl()) null else blockedPreviewResponse()
-                            }
+                            loadUrl(targetUrl)
                         }
-                        loadUrl(targetUrl)
-                    }
-                },
-                update = { current ->
-                    webView = current
-                    if (current.url != targetUrl) current.loadUrl(targetUrl)
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
+                    },
+                    update = { current ->
+                        webView = current
+                        if (current.url != targetUrl) current.loadUrl(targetUrl)
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+        if (fullScreen) {
+            Surface(
+                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+                shape = CircleShape,
+                color = Color.Black.copy(alpha = 0.64f),
+                tonalElevation = 6.dp,
+            ) {
+                IconButton(onClick = onToggleFullScreen) {
+                    Icon(Icons.Default.FullscreenExit, contentDescription = "Exit full-screen preview", tint = Color.White)
+                }
+            }
         }
     }
 }
