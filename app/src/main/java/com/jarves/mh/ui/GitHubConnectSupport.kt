@@ -75,7 +75,7 @@ internal fun parseGitHubWorkSnapshot(output: String): GitHubWorkSnapshot {
 }
 
 internal fun extractGitHubPullRequestUrl(output: String): String? =
-    Regex("""https://github\.com/[^\s/]+/[^\s/]+/pull/\d+""").findAll(output).lastOrNull()?.value
+    Regex("""https://github\.com/[^\s/]+/[^\s/]+/pull/\d+""".replace("\\\\", "\\")).findAll(output).lastOrNull()?.value
 
 internal fun parseGitHubRepositories(json: String): List<GitHubRepository> {
     val array = JSONArray(json)
