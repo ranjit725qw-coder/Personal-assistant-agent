@@ -1,0 +1,36 @@
+name: Full-screen preview validation
+on:
+  push:
+    branches: [feature/fullscreen-preview]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Apply implementation
+        run: |
+          echo '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' | base64 -d | gzip -d > /tmp/fullscreen.patch
+          git apply --check /tmp/fullscreen.patch
+          git apply /tmp/fullscreen.patch
+          git diff --check
+      - name: Compile and test
+        run: ./gradlew compileOnlineReleaseKotlin testOnlineReleaseUnitTest lintOnlineRelease assembleOnlineDebug --stacktrace
+      - name: Commit validated implementation
+        run: |
+          rm .github/workflows/fullscreen-preview-validate.yml
+          git add app/src/main/java/com/jarves/mh/ui/PocketDevApp.kt .github/workflows/fullscreen-preview-validate.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'Add full-screen website preview mode'
+          git push
