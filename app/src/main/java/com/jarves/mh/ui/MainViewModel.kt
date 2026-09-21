@@ -167,6 +167,7 @@ data class AppUiState(
     val githubWorkCheckOutput: String = "",
     val githubWorkPullRequestUrl: String? = null,
     val githubWorkMessage: String? = null,
+    val githubChatWorkflow: GitHubChatWorkflow = GitHubChatWorkflow(),
     val aiUsage: AiUsageSummary = AiUsageSummary(),
     val apiKeyHealth: List<ApiKeyHealth> = emptyList(),
     val projects: List<Project> = emptyList(),
@@ -1348,7 +1349,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         if (current.activeProject?.id != project.id) current else current.copy(
                             githubWork = snapshot,
                             githubWorkRunning = false,
-                            githubWorkChecksPassed = if (snapshot.status.isBlank()) current.githubWorkChecksPassed else false,
+                            githubWorkChecksPassed = current.githubWorkChecksPassed &&
+                                snapshot.status == current.githubWork.status,
                             githubWorkPullRequestUrl = current.githubWorkPullRequestUrl,
                             githubWorkMessage = when {
                                 exit != 0 -> output.takeLast(300).ifBlank { "Could not inspect Git repository" }
@@ -1371,6 +1373,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun prepareGitHubWorkBranchCommand(branchSeed: String): String = """
+        set -e
+        test -d .git || { echo 'This project is not a Git repository'; exit 2; }
+        base=${'$'}(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
+        if [ -z "${'$'}base" ]; then
+          if git show-ref --verify --quiet refs/remotes/origin/main; then base=main
+          elif git show-ref --verify --quiet refs/remotes/origin/master; then base=master
+          else base=main; fi
+        fi
+        branch=${'$'}(git branch --show-current)
+        case "${'$'}branch" in main|master|"${'$'}base"|'') git switch -c ${shellQuote(branchSeed)} ;; esac
+        ${gitHubWorkSnapshotCommand()}
+    """.trimIndent()
+
     fun prepareGitHubWorkBranch() {
         val project = _state.value.activeProject ?: return
         val current = _state.value
@@ -1378,19 +1394,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(githubWorkRunning = true, githubWorkMessage = "Preparing a protected work branch…", githubWorkPullRequestUrl = null) }
         viewModelScope.launch(Dispatchers.IO) {
             val branchSeed = "agent/mobile-harness-${System.currentTimeMillis().toString().takeLast(10)}"
-            val command = """
-                set -e
-                test -d .git || { echo 'This project is not a Git repository'; exit 2; }
-                base=${'$'}(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
-                if [ -z "${'$'}base" ]; then
-                  if git show-ref --verify --quiet refs/remotes/origin/main; then base=main
-                  elif git show-ref --verify --quiet refs/remotes/origin/master; then base=master
-                  else base=main; fi
-                fi
-                branch=${'$'}(git branch --show-current)
-                case "${'$'}branch" in main|master|"${'$'}base"|'') git switch -c ${shellQuote(branchSeed)} ;; esac
-                ${gitHubWorkSnapshotCommand()}
-            """.trimIndent()
+            val command = prepareGitHubWorkBranchCommand(branchSeed)
             runCatching { runGitHubProjectCommand(project, command) }
                 .onSuccess { (exit, output) ->
                     val snapshot = parseGitHubWorkSnapshot(output)
@@ -1417,7 +1421,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (checkCommand.isBlank() || current.githubWorkRunning || current.isRunning || current.projectTerminalRunning ||
             !current.githubWork.isRepository || isProtectedGitBranch(current.githubWork.branch, current.githubWork.baseBranch)
         ) return
-        _state.update { it.copy(githubWorkRunning = true, githubWorkChecksPassed = false, githubWorkCheckCommand = checkCommand, githubWorkCheckOutput = "", githubWorkMessage = "Running checks…") }
+        _state.update { it.copy(
+            githubWorkRunning = true,
+            githubWorkChecksPassed = false,
+            githubWorkCheckCommand = checkCommand,
+            githubWorkCheckOutput = "",
+            githubWorkMessage = "Running checks…",
+            githubChatWorkflow = it.githubChatWorkflow.copy(stage = GitHubChatStage.CHECKING, message = "Running checks before PR publication…"),
+        ) }
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { runGitHubProjectCommand(project, checkCommand, GITHUB_WORK_CHECK_TIMEOUT_MS) }
                 .onSuccess { (exit, output) ->
@@ -1426,10 +1437,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         githubWorkChecksPassed = exit == 0,
                         githubWorkCheckOutput = output.takeLast(6_000),
                         githubWorkMessage = if (exit == 0) "Checks passed" else "Checks failed with exit code $exit",
+                        githubChatWorkflow = state.githubChatWorkflow.copy(
+                            stage = if (exit == 0) GitHubChatStage.READY_TO_PUBLISH else GitHubChatStage.REVIEW,
+                            message = if (exit == 0) "Checks passed. Review and confirm PR publication." else "Checks failed. Fix the issue or run checks again.",
+                        ),
                     ) }
                     refreshGitHubWork()
                 }
-                .onFailure { error -> _state.update { it.copy(githubWorkRunning = false, githubWorkChecksPassed = false, githubWorkCheckOutput = error.message.orEmpty().takeLast(2_000), githubWorkMessage = "Checks failed") } }
+                .onFailure { error -> _state.update { it.copy(
+                    githubWorkRunning = false,
+                    githubWorkChecksPassed = false,
+                    githubWorkCheckOutput = error.message.orEmpty().takeLast(2_000),
+                    githubWorkMessage = "Checks failed",
+                    githubChatWorkflow = it.githubChatWorkflow.copy(stage = GitHubChatStage.ERROR, message = "Checks could not complete."),
+                ) } }
         }
     }
 
@@ -1443,7 +1464,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             current.githubAuthStatus != GitHubAuthStatus.CONNECTED || !work.isRepository ||
             isProtectedGitBranch(work.branch, work.baseBranch) || !current.githubWorkChecksPassed
         ) return
-        _state.update { it.copy(githubWorkRunning = true, githubWorkMessage = "Committing, pushing, and opening a pull request…", githubWorkPullRequestUrl = null) }
+        _state.update { it.copy(
+            githubWorkRunning = true,
+            githubWorkMessage = "Committing, pushing, and opening a pull request…",
+            githubWorkPullRequestUrl = null,
+            githubChatWorkflow = it.githubChatWorkflow.copy(stage = GitHubChatStage.PUBLISHING, message = "Publishing the confirmed pull request…"),
+        ) }
         viewModelScope.launch(Dispatchers.IO) {
             val body = buildString {
                 append("Created from Mobile Harness GitHub Work Mode.\\n\\n")
@@ -1468,10 +1494,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         githubWorkRunning = false,
                         githubWorkPullRequestUrl = url,
                         githubWorkMessage = if (exit == 0 && url != null) "Pull request opened successfully" else output.takeLast(800).ifBlank { "Could not open pull request" },
+                        githubChatWorkflow = state.githubChatWorkflow.copy(
+                            stage = if (exit == 0 && url != null) GitHubChatStage.COMPLETE else GitHubChatStage.ERROR,
+                            message = if (exit == 0 && url != null) "Pull request opened successfully." else "PR publication failed. Review the error and retry.",
+                            pullRequestUrl = url,
+                        ),
                     ) }
                     refreshGitHubWork()
                 }
-                .onFailure { error -> _state.update { it.copy(githubWorkRunning = false, githubWorkMessage = redactGitHubSensitiveOutput(error.message.orEmpty()).take(500).ifBlank { "Could not open pull request" }) } }
+                .onFailure { error -> _state.update { it.copy(
+                    githubWorkRunning = false,
+                    githubWorkMessage = redactGitHubSensitiveOutput(error.message.orEmpty()).take(500).ifBlank { "Could not open pull request" },
+                    githubChatWorkflow = it.githubChatWorkflow.copy(stage = GitHubChatStage.ERROR, message = "PR publication failed. Review the error and retry."),
+                ) } }
         }
     }
 
@@ -2197,6 +2232,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 githubWorkCheckOutput = "",
                 githubWorkPullRequestUrl = null,
                 githubWorkMessage = null,
+                githubChatWorkflow = GitHubChatWorkflow(),
             )
         }
         refreshProjectFiles()
@@ -2744,6 +2780,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendPrompt(prompt: String) {
+        val current = state.value
+        val project = current.activeProject ?: return
+        val attachments = current.pendingAttachments
+        if ((prompt.isBlank() && attachments.isEmpty()) || current.isRunning || current.githubWorkRunning) return
+        val requestText = prompt.trim().ifBlank { "Please review the attached files." }
+        if (current.githubAuthStatus == GitHubAuthStatus.CONNECTED) {
+            _state.update { it.copy(
+                githubWorkRunning = true,
+                githubChatWorkflow = GitHubChatWorkflow(
+                    stage = GitHubChatStage.PREPARING_BRANCH,
+                    request = requestText,
+                    checkCommand = "git diff --check",
+                    commitMessage = defaultGitHubCommitMessage(requestText, project.name),
+                    pullRequestTitle = defaultGitHubPullRequestTitle(requestText, project.name),
+                    message = "Inspecting the repository and preparing a safe work branch…",
+                ),
+            ) }
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching {
+                    val (_, snapshotOutput) = runGitHubProjectCommand(project, gitHubWorkSnapshotCommand(), GITHUB_WORK_READ_TIMEOUT_MS)
+                    var snapshot = parseGitHubWorkSnapshot(snapshotOutput)
+                    if (snapshot.isRepository && isProtectedGitBranch(snapshot.branch, snapshot.baseBranch)) {
+                        val branch = "agent/mobile-harness-${System.currentTimeMillis().toString().takeLast(10)}"
+                        val (exit, output) = runGitHubProjectCommand(project, prepareGitHubWorkBranchCommand(branch))
+                        if (exit != 0) error(output.ifBlank { "Could not prepare a safe work branch" })
+                        snapshot = parseGitHubWorkSnapshot(output)
+                    }
+                    snapshot
+                }.onSuccess { snapshot ->
+                    _state.update { it.copy(
+                        githubWork = snapshot,
+                        githubWorkRunning = false,
+                        githubWorkChecksPassed = false,
+                        githubChatWorkflow = if (snapshot.isRepository) it.githubChatWorkflow.copy(
+                            stage = GitHubChatStage.EDITING,
+                            message = "Safe branch ready. The agent is editing the project now…",
+                        ) else GitHubChatWorkflow(),
+                    ) }
+                    withContext(Dispatchers.Main) { startPrompt(prompt) }
+                }.onFailure { error ->
+                    _state.update { it.copy(
+                        githubWorkRunning = false,
+                        githubChatWorkflow = it.githubChatWorkflow.copy(
+                            stage = GitHubChatStage.ERROR,
+                            message = redactGitHubSensitiveOutput(error.message.orEmpty()).ifBlank { "Could not prepare GitHub Work Mode." },
+                        ),
+                    ) }
+                }
+            }
+            return
+        }
+        startPrompt(prompt)
+    }
+
+    private fun startPrompt(prompt: String) {
         val project = state.value.activeProject ?: return
         val attachments = state.value.pendingAttachments
         if ((prompt.isBlank() && attachments.isEmpty()) || state.value.isRunning) return
@@ -2768,6 +2859,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 taskFinishedAtMillis = null,
                 workSegmentStartedAtMillis = startedAt,
                 currentTaskRequest = requestText,
+                githubChatWorkflow = if (it.githubWork.isRepository) it.githubChatWorkflow.copy(
+                    stage = GitHubChatStage.EDITING,
+                    request = requestText,
+                    commitMessage = it.githubChatWorkflow.commitMessage.ifBlank { defaultGitHubCommitMessage(requestText, project.name) },
+                    pullRequestTitle = it.githubChatWorkflow.pullRequestTitle.ifBlank { defaultGitHubPullRequestTitle(requestText, project.name) },
+                    message = "The agent is editing the safe work branch…",
+                ) else it.githubChatWorkflow,
             )
         }
         touchProject(project.id)
@@ -3108,6 +3206,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         current.activity.map { if (!it.isComplete) it.copy(isComplete = true) else it },
                     taskFinishedAtMillis = System.currentTimeMillis(),
                     currentTaskRequest = null,
+                    githubChatWorkflow = if (current.githubWork.isRepository) current.githubChatWorkflow.copy(
+                        stage = GitHubChatStage.REVIEW,
+                        message = "Edits finished. Review the changed files, then run checks from this chat.",
+                    ) else current.githubChatWorkflow,
                 )
                 is RuntimeEvent.SessionFailed -> finishWorkSegment(
                     appendWorkItem(current, ActivityItem("Task stopped", event.reason)),
@@ -3123,6 +3225,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     activity = listOf(ActivityItem("Task stopped", event.reason)) + current.activity,
                     taskFinishedAtMillis = System.currentTimeMillis(),
                     currentTaskRequest = null,
+                    githubChatWorkflow = if (current.githubWork.isRepository) current.githubChatWorkflow.copy(
+                        stage = GitHubChatStage.ERROR,
+                        message = "The coding task stopped before PR preparation completed: ${event.reason}",
+                    ) else current.githubChatWorkflow,
                 )
             }
         }
@@ -3139,6 +3245,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (event is RuntimeEvent.FilesChanged || event is RuntimeEvent.SessionCompleted) {
             _state.value.activeProject?.id?.let { touchProject(it) }
             refreshProjectFiles()
+            if (event is RuntimeEvent.SessionCompleted && _state.value.githubWork.isRepository) refreshGitHubWork()
         }
         if (event is RuntimeEvent.AssistantDelta || event is RuntimeEvent.SessionCompleted || event is RuntimeEvent.SessionFailed) {
             persistMessages()
