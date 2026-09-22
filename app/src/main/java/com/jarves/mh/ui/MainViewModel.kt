@@ -1368,23 +1368,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun gitHubWorkSnapshotCommand(): String = """
-        if [ ! -d .git ]; then
-          printf '__REPOSITORY__\nno\n__BRANCH__\n\n__BASE__\nmain\n__STATUS__\n\n__DIFF__\n'
-          exit 0
-        fi
-        base=${'$'}(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
-        if [ -z "${'$'}base" ]; then
-          if git show-ref --verify --quiet refs/remotes/origin/main; then base=main
-          elif git show-ref --verify --quiet refs/remotes/origin/master; then base=master
-          else base=main; fi
-        fi
-        printf '__REPOSITORY__\nyes\n__BRANCH__\n%s\n__BASE__\n%s\n__STATUS__\n' "${'$'}(git branch --show-current)" "${'$'}base"
-        git status --short
-        printf '__DIFF__\n'
-        { git diff --stat; git diff --cached --stat; } | awk 'NF && !seen[${'$'}0]++'
-    """.trimIndent()
-
     private fun runGitHubProjectCommand(project: Project, command: String, timeoutMs: Long = GITHUB_WORK_TIMEOUT_MS): Pair<Int, String> {
         val runtime = installer.installedRuntime()
         val workspace = projectWorkspaceRoot(project)
@@ -1418,7 +1401,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_state.value.githubWorkRunning || _state.value.isRunning || _state.value.projectTerminalRunning) return
         _state.update { it.copy(githubWorkRunning = true, githubWorkMessage = "Checking Git repository…") }
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { runGitHubProjectCommand(project, gitHubWorkSnapshotCommand(), GITHUB_WORK_READ_TIMEOUT_MS) }
+            runCatching { runGitHubProjectCommand(project, GitHubWorkCommands.snapshot(), GITHUB_WORK_READ_TIMEOUT_MS) }
                 .onSuccess { (exit, output) ->
                     val snapshot = if (exit == 0) parseGitHubWorkSnapshot(output) else GitHubWorkSnapshot()
                     _state.update { current ->
@@ -1449,20 +1432,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun prepareGitHubWorkBranchCommand(branchSeed: String): String = """
-        set -e
-        test -d .git || { echo 'This project is not a Git repository'; exit 2; }
-        base=${'$'}(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
-        if [ -z "${'$'}base" ]; then
-          if git show-ref --verify --quiet refs/remotes/origin/main; then base=main
-          elif git show-ref --verify --quiet refs/remotes/origin/master; then base=master
-          else base=main; fi
-        fi
-        branch=${'$'}(git branch --show-current)
-        case "${'$'}branch" in main|master|"${'$'}base"|'') git switch -c ${shellQuote(branchSeed)} ;; esac
-        ${gitHubWorkSnapshotCommand()}
-    """.trimIndent()
-
     fun prepareGitHubWorkBranch() {
         val project = _state.value.activeProject ?: return
         val current = _state.value
@@ -1470,7 +1439,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(githubWorkRunning = true, githubWorkMessage = "Preparing a protected work branch…", githubWorkPullRequestUrl = null) }
         viewModelScope.launch(Dispatchers.IO) {
             val branchSeed = "agent/mobile-harness-${System.currentTimeMillis().toString().takeLast(10)}"
-            val command = prepareGitHubWorkBranchCommand(branchSeed)
+            val command = GitHubWorkCommands.prepareBranch(branchSeed)
             runCatching { runGitHubProjectCommand(project, command) }
                 .onSuccess { (exit, output) ->
                     val snapshot = parseGitHubWorkSnapshot(output)
@@ -1553,16 +1522,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 append(current.githubWorkCheckCommand.replace("`", "'"))
                 append("` (passed)")
             }
-            val command = """
-                set -e
-                branch=${'$'}(git branch --show-current)
-                case "${'$'}branch" in ''|main|master|${shellQuote(work.baseBranch)}) echo 'Refusing to publish from a protected branch'; exit 3 ;; esac
-                git add -A
-                if ! git diff --cached --quiet; then git commit -m ${shellQuote(commit)}; fi
-                test "${'$'}(git rev-list --count origin/${shellQuote(work.baseBranch)}..HEAD)" -gt 0 || { echo 'No commits to publish'; exit 4; }
-                git push --set-upstream origin HEAD
-                gh pr create --base ${shellQuote(work.baseBranch)} --head "${'$'}branch" --title ${shellQuote(title)} --body ${shellQuote(body)}
-            """.trimIndent()
+            val command = GitHubWorkCommands.publish(work.baseBranch, commit, title, body)
             runCatching { runGitHubProjectCommand(project, command, GITHUB_WORK_PUBLISH_TIMEOUT_MS) }
                 .onSuccess { (exit, output) ->
                     val url = if (exit == 0) extractGitHubPullRequestUrl(output) else null
@@ -2879,11 +2839,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ) }
             viewModelScope.launch(Dispatchers.IO) {
                 runCatching {
-                    val (_, snapshotOutput) = runGitHubProjectCommand(project, gitHubWorkSnapshotCommand(), GITHUB_WORK_READ_TIMEOUT_MS)
+                    val (_, snapshotOutput) = runGitHubProjectCommand(project, GitHubWorkCommands.snapshot(), GITHUB_WORK_READ_TIMEOUT_MS)
                     var snapshot = parseGitHubWorkSnapshot(snapshotOutput)
                     if (snapshot.isRepository && isProtectedGitBranch(snapshot.branch, snapshot.baseBranch)) {
                         val branch = "agent/mobile-harness-${System.currentTimeMillis().toString().takeLast(10)}"
-                        val (exit, output) = runGitHubProjectCommand(project, prepareGitHubWorkBranchCommand(branch))
+                        val (exit, output) = runGitHubProjectCommand(project, GitHubWorkCommands.prepareBranch(branch))
                         if (exit != 0) error(output.ifBlank { "Could not prepare a safe work branch" })
                         snapshot = parseGitHubWorkSnapshot(output)
                     }
