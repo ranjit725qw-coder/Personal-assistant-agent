@@ -2,7 +2,7 @@
 
   <img src="assets/readme/logo.svg" alt="Mobile Harness Logo" width="104" height="104" style="border-radius: 24px;" />
 
-  # Mobile Harness
+  # Personal Assistant
 
   ### *The complete autonomous AI development workspace for Android.*
 
@@ -18,7 +18,7 @@
 
   <br />
 
-  [**Download Online APK**](https://github.com/techjarves/Mobile-Harness/releases/download/v1.0.3/mobile-harness-online-v1.0.3.apk) &nbsp;•&nbsp;
+  [**Download Online APK**](https://github.com/ranjit725qw-coder/Personal-assistant-agent/releases/latest) &nbsp;•&nbsp;
   [**Download Offline APK**](https://github.com/techjarves/Mobile-Harness/releases/download/v1.0.3/mobile-harness-offline-v1.0.3.apk) &nbsp;•&nbsp;
   [**Watch Walkthrough (3 min)**](https://youtu.be/QzAau52Z7yQ) &nbsp;•&nbsp;
   [**Quickstart Guide**](#quickstart) &nbsp;•&nbsp;
@@ -62,7 +62,7 @@
       <h3>Online Edition</h3>
       <p><strong>44.6 MB · Recommended</strong></p>
       <p>Start with the smaller APK. Core, Python, and Android runtime bundles are downloaded only when needed.</p>
-      <a href="https://github.com/techjarves/Mobile-Harness/releases/download/v1.0.3/mobile-harness-online-v1.0.3.apk">
+      <a href="https://github.com/ranjit725qw-coder/Personal-assistant-agent/releases/latest">
         <img src="https://img.shields.io/badge/Download-Online_APK-F28C52?style=for-the-badge&logo=android&logoColor=white" alt="Download Online APK" />
       </a>
     </td>

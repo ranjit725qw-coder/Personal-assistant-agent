@@ -102,7 +102,7 @@ class RuntimeInstaller(private val context: Context) {
 
     /** Returns the already verified runtime without performing network or update checks. */
     fun installedRuntime(): InstalledRuntime {
-        check(isInstalled()) { "Claude Code setup is incomplete. Reopen Mobile Harness to repair it." }
+        check(isInstalled()) { "Claude Code setup is incomplete. Reopen Personal Assistant to repair it." }
         return InstalledRuntime(
             proot = File(context.applicationInfo.nativeLibraryDir, "libproot.so"),
             rootfs = rootfs,

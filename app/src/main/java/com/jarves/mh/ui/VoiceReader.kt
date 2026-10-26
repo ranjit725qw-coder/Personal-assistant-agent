@@ -64,10 +64,7 @@ object SpeechReader {
             ready = status == TextToSpeech.SUCCESS
             if (ready) {
                 val engine = tts ?: return@TextToSpeech
-                val picked = engine.setLanguage(Locale.getDefault())
-                if (picked == TextToSpeech.LANG_MISSING_DATA || picked == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    engine.language = Locale.US
-                }
+                applyLanguageFor(engine, "")
                 engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {
                         isSpeaking = true
@@ -97,6 +94,7 @@ object SpeechReader {
             Toast.makeText(context, "পড়ার মতো লেখা নেই", Toast.LENGTH_SHORT).show()
             return
         }
+        applyLanguageFor(engine, clean)
         engine.setPitch(style.pitch)
         engine.setSpeechRate(style.rate)
         isSpeaking = true
@@ -111,6 +109,28 @@ object SpeechReader {
     fun cycleStyle(context: Context) {
         style = style.next()
         Toast.makeText(context, "ভয়েস: ${style.labelBn}", Toast.LENGTH_SHORT).show()
+    }
+
+    private val BANGLA_LOCALES = listOf(Locale("bn", "IN"), Locale("bn", "BD"), Locale("bn"))
+    private val BENGALI_SCRIPT = Regex("[\\u0980-\\u09FF]")
+
+    private fun isUsable(result: Int): Boolean =
+        result != TextToSpeech.LANG_MISSING_DATA && result != TextToSpeech.LANG_NOT_SUPPORTED
+
+    /**
+     * Picks the voice language for [text]: Bangla when the text contains
+     * Bengali script (or the phone language is Bangla), otherwise the phone
+     * language, falling back to US English.
+     */
+    private fun applyLanguageFor(engine: TextToSpeech, text: String) {
+        val wantsBangla = BENGALI_SCRIPT.containsMatchIn(text) || Locale.getDefault().language == "bn"
+        if (wantsBangla) {
+            for (locale in BANGLA_LOCALES) {
+                if (isUsable(runCatching { engine.setLanguage(locale) }.getOrDefault(TextToSpeech.LANG_NOT_SUPPORTED))) return
+            }
+        }
+        if (isUsable(runCatching { engine.setLanguage(Locale.getDefault()) }.getOrDefault(TextToSpeech.LANG_NOT_SUPPORTED))) return
+        runCatching { engine.setLanguage(Locale.US) }
     }
 
     /** Removes code blocks and markdown symbols so TTS reads clean sentences. */
