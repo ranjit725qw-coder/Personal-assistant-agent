@@ -14,7 +14,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.graphics.Color
@@ -31,6 +36,20 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import java.util.Locale
 
+/** Language used for voice typing. Long-press the mic to switch. */
+enum class VoiceInputLanguage(val tag: String, val label: String) {
+    BANGLA("bn-IN", "বাংলা"),
+    ENGLISH("en-US", "English");
+
+    fun next(): VoiceInputLanguage = entries[(ordinal + 1) % entries.size]
+}
+
+object VoiceInputSettings {
+    var language by mutableStateOf(
+        if (Locale.getDefault().language == "en") VoiceInputLanguage.ENGLISH else VoiceInputLanguage.BANGLA,
+    )
+}
+
 /**
  * Custom feature (not in the original repo): a microphone button for the chat
  * input box. Tap to speak in Bangla/English, tap again to finish. The
@@ -39,6 +58,7 @@ import java.util.Locale
  * Requires the RECORD_AUDIO permission in AndroidManifest.xml.
  * Speech recognition needs internet (Google voice typing) on most phones.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun VoiceInputButton(
     enabled: Boolean = true,
@@ -98,7 +118,10 @@ fun VoiceInputButton(
         })
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            val tag = VoiceInputSettings.language.tag
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, tag)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, tag)
+            putExtra("android.speech.extra.ONLY_RETURN_LANGUAGE_PREFERENCE", tag)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
         }
@@ -132,26 +155,39 @@ fun VoiceInputButton(
         onDispose { cleanup() }
     }
 
-    IconButton(
-        onClick = {
-            if (listening) {
-                stopAndKeep()
-                return@IconButton
-            }
-            val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-                PackageManager.PERMISSION_GRANTED
-            if (granted) {
-                startListening()
-            } else {
-                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            }
-        },
-        enabled = enabled,
-        modifier = Modifier.size(40.dp),
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .combinedClickable(
+                enabled = enabled,
+                onClick = {
+                    if (listening) {
+                        stopAndKeep()
+                        return@combinedClickable
+                    }
+                    val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                        PackageManager.PERMISSION_GRANTED
+                    if (granted) {
+                        startListening()
+                    } else {
+                        permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                },
+                onLongClick = {
+                    VoiceInputSettings.language = VoiceInputSettings.language.next()
+                    Toast.makeText(
+                        context,
+                        "ভয়েস টাইপিং: ${VoiceInputSettings.language.label}",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                },
+            ),
+        contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = Icons.Default.Mic,
-            contentDescription = if (listening) "Stop listening" else "Voice input",
+            contentDescription = if (listening) "Stop listening" else "Voice input (${VoiceInputSettings.language.label}), long-press to switch language",
             modifier = Modifier.size(20.dp),
             tint = when {
                 listening -> PocketOrange

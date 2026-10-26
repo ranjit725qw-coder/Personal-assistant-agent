@@ -51,12 +51,12 @@ class RuntimeExecutionService : Service() {
             }
             ACTION_COMPLETE -> finishTask(
                 title = "Task completed",
-                detail = intent?.getStringExtra(EXTRA_DETAIL) ?: "Mobile Harness finished working in $projectName.",
+                detail = intent?.getStringExtra(EXTRA_DETAIL) ?: "Personal Assistant finished working in $projectName.",
                 failed = false,
             )
             ACTION_FAILED -> finishTask(
                 title = "Task needs attention",
-                detail = intent?.getStringExtra(EXTRA_DETAIL) ?: "Mobile Harness could not finish the task.",
+                detail = intent?.getStringExtra(EXTRA_DETAIL) ?: "Personal Assistant could not finish the task.",
                 failed = true,
             )
             ACTION_CANCELLED -> {
@@ -80,7 +80,7 @@ class RuntimeExecutionService : Service() {
     private fun runningNotification(detail: String, includeStop: Boolean): android.app.Notification {
         val builder = NotificationCompat.Builder(this, RUNNING_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Mobile Harness is working")
+            .setContentTitle("Personal Assistant is working")
             .setContentText(detail)
             .setContentIntent(openAppIntent())
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
@@ -165,7 +165,7 @@ class RuntimeExecutionService : Service() {
             val manager = context.getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(
                 NotificationChannel(RUNNING_CHANNEL_ID, "Running coding tasks", NotificationManager.IMPORTANCE_LOW).apply {
-                    description = "Shows progress while Mobile Harness is working in the background"
+                    description = "Shows progress while Personal Assistant is working in the background"
                 },
             )
             manager.createNotificationChannel(
