@@ -1715,6 +1715,9 @@ private fun ProviderSetupScreen(
                     onDiscover = { onDiscover(ProviderProfile(selected, baseUrl.trim(), model.trim()), apiKey) },
                     onValidate = { models -> onValidate(ProviderProfile(selected, baseUrl.trim(), model.trim()), apiKey, models) },
                     onSave = { onSave(ProviderProfile(selected, baseUrl.trim(), model.trim()), apiKey) },
+                    onSkip = if (onboarding) {
+                        { onSave(ProviderProfile(selected, baseUrl.trim(), model.trim()), "") }
+                    } else null,
                 )
             }
         }
@@ -1968,8 +1971,10 @@ private fun ProviderCredentialsStep(
     onDiscover: suspend () -> ModelDiscoveryResult,
     onValidate: suspend (List<DiscoveredModel>) -> ConnectionValidation,
     onSave: () -> Unit,
+    onSkip: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
+    var validationFailed by remember { mutableStateOf(false) }
     var models by remember(baseUrl) { mutableStateOf(emptyList<DiscoveredModel>()) }
     var isDiscovering by remember { mutableStateOf(false) }
     var isValidating by remember { mutableStateOf(false) }
@@ -2194,6 +2199,7 @@ private fun ProviderCredentialsStep(
                                 is ConnectionValidation.Failure -> {
                                     status = result.message
                                     statusOk = false
+                                    validationFailed = true
                                 }
                             }
                             isValidating = false
@@ -2207,6 +2213,27 @@ private fun ProviderCredentialsStep(
                         Spacer(Modifier.width(7.dp))
                     }
                     Text(if (isValidating) "Checking" else "Continue")
+            }
+        }
+        if (validationFailed && hasKey && !isValidating) {
+            item {
+                OutlinedButton(
+                    onClick = onSave,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                ) {
+                    Text("Save key anyway & open app")
+                }
+            }
+        }
+        if (onSkip != null) {
+            item {
+                TextButton(
+                    onClick = onSkip,
+                    enabled = !isValidating,
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                ) {
+                    Text("Skip for now — add API key later in Settings")
+                }
             }
         }
     }
